@@ -1,0 +1,1 @@
+# Harici paket gerektirmez! Tamamı Python 3.12 standart kütüphanesiyle çalışır (0$ & sıfır bağımlılık hatası).

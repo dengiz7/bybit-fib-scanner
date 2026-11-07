@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: bybit-15m-fib-scanner
+    runtime: python
+    region: frankfurt
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python scanner.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: TOP_SYMBOLS_COUNT
+        value: "75"
+      - key: SCAN_INTERVAL_SECONDS
+        value: "45"

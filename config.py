@@ -80,6 +80,13 @@ class Config:
     DEFAULT_BANKROLL_USD: float = float(os.getenv("DEFAULT_BANKROLL_USD", "100.0"))
     DEFAULT_LEVERAGE: int = int(os.getenv("DEFAULT_LEVERAGE", "10"))
 
+    # --- Bybit V5 Demo Trading Otomatik Al-Sat Ayarları (%100 Ücretsiz Sanal Bakiye) ---
+    BYBIT_DEMO_API_KEY: str = os.getenv("BYBIT_DEMO_API_KEY", "").strip()
+    BYBIT_DEMO_API_SECRET: str = os.getenv("BYBIT_DEMO_API_SECRET", "").strip()
+    BYBIT_DEMO_BASE_URL: str = os.getenv("BYBIT_DEMO_BASE_URL", "https://api-demo.bybit.com").strip()
+    DEMO_AUTO_TRADE_ENABLED: bool = os.getenv("DEMO_AUTO_TRADE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
+    MAX_CONCURRENT_DEMO_TRADES: int = int(os.getenv("MAX_CONCURRENT_DEMO_TRADES", "3"))
+
     # --- Videodaki 6 Özel Fibonacci Seviyesi (Video 1 [03:52] & Video 2 [06:01]) ---
     FIB_LEVEL_1: float = 1.000       # İtkisel hareketin başlangıcı (Stop-Loss referansı)
     FIB_LEVEL_0618: float = 0.618    # Altın Cep (Golden Pocket) - Ana Limit Emir Giriş Seviyesi
@@ -120,3 +127,5 @@ class Config:
         load_env_file()
         cls.TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
         cls.TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+        cls.BYBIT_DEMO_API_KEY = os.getenv("BYBIT_DEMO_API_KEY", "").strip()
+        cls.BYBIT_DEMO_API_SECRET = os.getenv("BYBIT_DEMO_API_SECRET", "").strip()

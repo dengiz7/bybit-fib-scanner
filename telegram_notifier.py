@@ -503,8 +503,9 @@ class TelegramNotifier:
         """Telegram sohbet ekranında mavi 'Menü' butonunu otomatik oluşturur."""
         commands = [
             {"command": "rapor", "description": "Saatlik ve günlük TP/SL + Kasa Kazanç bilançosu"},
+            {"command": "demo", "description": "Bybit Demo açık pozisyonlar ve bekleyen emirler"},
             {"command": "aktif", "description": "Pusudaki ve Altın Bölgedeki aktif kurulumlar"},
-            {"command": "durum", "description": "Tarayıcı çalışma durumu ve son tarama saati"},
+            {"command": "durum", "description": "Tarayıcı çalışma durumu ve güncel 100$ kasa bilgisi"},
             {"command": "tara", "description": "Hemen şimdi anlık Bybit taraması başlat"},
             {"command": "yardim", "description": "Komut listesini ve açıklamaları göster"},
         ]
@@ -531,9 +532,12 @@ class TelegramNotifier:
         get_active_cb: Callable[[], str],
         trigger_scan_cb: Callable[[], str],
         get_report_cb: Optional[Callable[[], str]] = None,
+        get_demo_cb: Optional[Callable[[], str]] = None,
+        set_bankroll_cb: Optional[Callable[[float], str]] = None,
+        toggle_auto_cb: Optional[Callable[[bool], str]] = None,
     ) -> None:
         """
-        Telegram'dan gelen /start, /durum, /aktif, /rapor, /tara komutlarını dinler.
+        Telegram'dan gelen /start, /durum, /aktif, /rapor, /demo, /kasa, /oto_ac, /oto_kapat, /tara komutlarını dinler.
         """
         if not self.token:
             return
@@ -583,7 +587,8 @@ class TelegramNotifier:
             if sender_chat_id != self.chat_id:
                 continue
 
-            cmd = text.split()[0].lower().split("@")[0] if text else "/start"
+            parts = text.split() if text else ["/start"]
+            cmd = parts[0].lower().split("@")[0]
             if cmd in handled_cmds_in_batch and not first_time_linked:
                 continue
             handled_cmds_in_batch.add(cmd)
@@ -592,14 +597,16 @@ class TelegramNotifier:
             if first_time_linked or cmd in ("/start", "/yardim", "/help"):
                 welcome = (
                     f"👋 Merhaba <b>{first_name}</b>!\n\n"
-                    f"🚀 <b>Bybit 15dk Fibonacci + SMC/ICT Kasa Yönetimli Tarayıcı</b> aktif!\n"
+                    f"🚀 <b>Bybit 15dk Fibonacci + SMC/ICT + Demo Otomatik İşlem Botu</b> aktif!\n"
                     f"🆔 Kayıtlı Chat ID: <code>{self.chat_id}</code>\n\n"
                     f"📌 <b>Kullanabileceğin Komutlar (Sol alttaki Menü'den de seçebilirsin):</b>\n"
                     f"  • /rapor — Saatlik ve günlük TP/SL sayısı + Kasa Kazanç bilançosu\n"
+                    f"  • /demo — Bybit Demo açık pozisyonlar, bekleyen emirler ve cüzdan\n"
+                    f"  • /kasa 100 — Kasa bütçesini 100$ (veya istediğin tutar) olarak ayarla/sıfırla\n"
+                    f"  • /oto_ac ve /oto_kapat — Bybit Demo otomatik emir açmayı aç/kapat\n"
                     f"  • /aktif — Şu an pusuda (Aşama 1) ve Altın Bölgede (Aşama 2) olan pariteler\n"
                     f"  • /durum — Tarayıcı çalışma istatistikleri ve güncel kasa bilgisi\n"
-                    f"  • /tara — Hemen şimdi anlık tarama başlat\n"
-                    f"  • /yardim — Bu menüyü göster"
+                    f"  • /tara — Hemen şimdi anlık tarama başlat"
                 )
                 self.send_message(welcome, sender_chat_id)
                 if first_time_linked:
@@ -608,6 +615,24 @@ class TelegramNotifier:
             elif cmd in ("/rapor", "/gunluk", "/bakiye"):
                 if get_report_cb is not None:
                     self.send_message(get_report_cb(), sender_chat_id)
+            elif cmd in ("/demo", "/cuzdan"):
+                if get_demo_cb is not None:
+                    self.send_message(get_demo_cb(), sender_chat_id)
+            elif cmd == "/kasa":
+                if set_bankroll_cb is not None:
+                    val = 100.0
+                    if len(parts) > 1:
+                        try:
+                            val = float(parts[1].replace(",", ".").replace("$", ""))
+                        except Exception:
+                            val = 100.0
+                    self.send_message(set_bankroll_cb(val), sender_chat_id)
+            elif cmd == "/oto_ac":
+                if toggle_auto_cb is not None:
+                    self.send_message(toggle_auto_cb(True), sender_chat_id)
+            elif cmd == "/oto_kapat":
+                if toggle_auto_cb is not None:
+                    self.send_message(toggle_auto_cb(False), sender_chat_id)
             elif cmd == "/durum":
                 self.send_message(get_status_cb(), sender_chat_id)
             elif cmd == "/aktif":

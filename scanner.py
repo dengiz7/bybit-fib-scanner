@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, List, Optional
 
 from bybit_client import BybitClient
+from bybit_trader import BybitDemoTrader
 from config import STATE_PATH, Config
 from strategy import (
     FibLevels,
@@ -47,6 +48,7 @@ class ScannerEngine:
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
         self.bybit = BybitClient()
+        self.demo_trader = BybitDemoTrader()
         self.notifier = TelegramNotifier()
         self._lock = threading.Lock()
 
@@ -284,15 +286,17 @@ class ScannerEngine:
                             if (direction == "LONG" and c.close > tp1_val) or (
                                 direction == "SHORT" and c.close < tp1_val
                             ):
+                                demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "MISSED_NO_PULLBACK")
                                 if not self.dry_run and self.notifier.is_configured:
-                                    self.notifier.send_message(
-                                        format_tp_hit_message(
-                                            tr,
-                                            "MISSED_NO_PULLBACK",
-                                            c.close,
-                                            current_bankroll=float(self.state.get("current_bankroll", 100.0)),
-                                        )
+                                    m_txt = format_tp_hit_message(
+                                        tr,
+                                        "MISSED_NO_PULLBACK",
+                                        c.close,
+                                        current_bankroll=float(self.state.get("current_bankroll", 100.0)),
                                     )
+                                    if demo_note:
+                                        m_txt += f"\n\n{demo_note}"
+                                    self.notifier.send_message(m_txt)
                                     print(f"[TELEGRAM GÖNDERİLDİ] Pusu İptal (Altın Bölgeye Dönmeden Gitti) -> {sym}")
                                 invalidated = True
                                 break
@@ -380,6 +384,10 @@ class ScannerEngine:
                                 confluence_notes=notes,
                             )
                             msg = format_setup_message(s2_setup, "STAGE_2", current_bankroll=cur_bank)
+                            if not self.dry_run:
+                                _, demo_note = self.demo_trader.place_setup_order(s2_setup, "STAGE_2", cur_bank)
+                                if demo_note:
+                                    msg += f"\n\n{demo_note}"
                             if not self.dry_run and self.notifier.is_configured:
                                 if self.notifier.send_message(msg):
                                     already_sent.append("STAGE_2")
@@ -410,45 +418,51 @@ class ScannerEngine:
                             loss_usd = -1.0 * pos_usd * (sl_pct / 100.0)
                             tot_usd = self._record_trade_event(tid, tr, "STOP_LOSS", loss_usd)
                             flip_watch[sym] = {"stopped_dir": direction, "ts": int(time.time() * 1000)}
+                            demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "STOP_LOSS") if not self.dry_run else ""
                             if not self.dry_run and self.notifier.is_configured:
-                                self.notifier.send_message(
-                                    format_tp_hit_message(
-                                        tr,
-                                        "STOP_LOSS",
-                                        live_c.close,
-                                        event_pnl_usd=loss_usd,
-                                        total_trade_pnl_usd=tot_usd,
-                                        current_bankroll=float(self.state["current_bankroll"]),
-                                    )
+                                m_txt = format_tp_hit_message(
+                                    tr,
+                                    "STOP_LOSS",
+                                    live_c.close,
+                                    event_pnl_usd=loss_usd,
+                                    total_trade_pnl_usd=tot_usd,
+                                    current_bankroll=float(self.state["current_bankroll"]),
                                 )
+                                if demo_note:
+                                    m_txt += f"\n\n{demo_note}"
+                                self.notifier.send_message(m_txt)
                         elif "TP2" not in hits:
                             tot_usd = self._record_trade_event(tid, tr, "BREAKEVEN_STOP", 0.0)
+                            demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "BREAKEVEN_STOP") if not self.dry_run else ""
                             if not self.dry_run and self.notifier.is_configured:
-                                self.notifier.send_message(
-                                    format_tp_hit_message(
-                                        tr,
-                                        "BREAKEVEN_STOP",
-                                        live_c.close,
-                                        event_pnl_usd=0.0,
-                                        total_trade_pnl_usd=tot_usd,
-                                        current_bankroll=float(self.state["current_bankroll"]),
-                                    )
+                                m_txt = format_tp_hit_message(
+                                    tr,
+                                    "BREAKEVEN_STOP",
+                                    live_c.close,
+                                    event_pnl_usd=0.0,
+                                    total_trade_pnl_usd=tot_usd,
+                                    current_bankroll=float(self.state["current_bankroll"]),
                                 )
+                                if demo_note:
+                                    m_txt += f"\n\n{demo_note}"
+                                self.notifier.send_message(m_txt)
                         else:
                             tp1_pct = calc_pct_diff(level_0618, tp1_val)
                             rem_gain_usd = 0.25 * pos_usd * (tp1_pct / 100.0)
                             tot_usd = self._record_trade_event(tid, tr, "TRAILING_TP1_STOP", rem_gain_usd)
+                            demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TRAILING_TP1_STOP") if not self.dry_run else ""
                             if not self.dry_run and self.notifier.is_configured:
-                                self.notifier.send_message(
-                                    format_tp_hit_message(
-                                        tr,
-                                        "TRAILING_TP1_STOP",
-                                        live_c.close,
-                                        event_pnl_usd=rem_gain_usd,
-                                        total_trade_pnl_usd=tot_usd,
-                                        current_bankroll=float(self.state["current_bankroll"]),
-                                    )
+                                m_txt = format_tp_hit_message(
+                                    tr,
+                                    "TRAILING_TP1_STOP",
+                                    live_c.close,
+                                    event_pnl_usd=rem_gain_usd,
+                                    total_trade_pnl_usd=tot_usd,
+                                    current_bankroll=float(self.state["current_bankroll"]),
                                 )
+                                if demo_note:
+                                    m_txt += f"\n\n{demo_note}"
+                                self.notifier.send_message(m_txt)
                         del tracked_trades[tid]
                         continue
 
@@ -462,17 +476,19 @@ class ScannerEngine:
                         tp1_pct = calc_pct_diff(level_0618, tp1_val)
                         gain_tp1_usd = 0.50 * pos_usd * (tp1_pct / 100.0)
                         tot_usd = self._record_trade_event(tid, tr, "TP1", gain_tp1_usd)
+                        demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP1") if not self.dry_run else ""
                         if not self.dry_run and self.notifier.is_configured:
-                            self.notifier.send_message(
-                                format_tp_hit_message(
-                                    tr,
-                                    "TP1",
-                                    live_c.close,
-                                    event_pnl_usd=gain_tp1_usd,
-                                    total_trade_pnl_usd=tot_usd,
-                                    current_bankroll=float(self.state["current_bankroll"]),
-                                )
+                            m_txt = format_tp_hit_message(
+                                tr,
+                                "TP1",
+                                live_c.close,
+                                event_pnl_usd=gain_tp1_usd,
+                                total_trade_pnl_usd=tot_usd,
+                                current_bankroll=float(self.state["current_bankroll"]),
                             )
+                            if demo_note:
+                                m_txt += f"\n\n{demo_note}"
+                            self.notifier.send_message(m_txt)
                             print(f"[TELEGRAM GÖNDERİLDİ] TP1 Vuruldu -> {sym} ({direction}) (+{gain_tp1_usd:.2f}$)")
 
                     # TP2 (-0.5 uzatma -> Pozisyonun %25'i daha kapanır, SL TP1'e çekilir)
@@ -485,17 +501,19 @@ class ScannerEngine:
                         tp2_pct = calc_pct_diff(level_0618, tp2_val)
                         gain_tp2_usd = 0.25 * pos_usd * (tp2_pct / 100.0)
                         tot_usd = self._record_trade_event(tid, tr, "TP2", gain_tp2_usd)
+                        demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP2") if not self.dry_run else ""
                         if not self.dry_run and self.notifier.is_configured:
-                            self.notifier.send_message(
-                                format_tp_hit_message(
-                                    tr,
-                                    "TP2",
-                                    live_c.close,
-                                    event_pnl_usd=gain_tp2_usd,
-                                    total_trade_pnl_usd=tot_usd,
-                                    current_bankroll=float(self.state["current_bankroll"]),
-                                )
+                            m_txt = format_tp_hit_message(
+                                tr,
+                                "TP2",
+                                live_c.close,
+                                event_pnl_usd=gain_tp2_usd,
+                                total_trade_pnl_usd=tot_usd,
+                                current_bankroll=float(self.state["current_bankroll"]),
                             )
+                            if demo_note:
+                                m_txt += f"\n\n{demo_note}"
+                            self.notifier.send_message(m_txt)
                             print(f"[TELEGRAM GÖNDERİLDİ] TP2 Vuruldu -> {sym} ({direction}) (+{gain_tp2_usd:.2f}$)")
 
                     # TP3 (-1.0 tam uzatma -> Son %25 pozisyon kapanır)
@@ -507,17 +525,19 @@ class ScannerEngine:
                         tp3_pct = calc_pct_diff(level_0618, tp3_val)
                         gain_tp3_usd = 0.25 * pos_usd * (tp3_pct / 100.0)
                         tot_usd = self._record_trade_event(tid, tr, "TP3", gain_tp3_usd)
+                        demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP3") if not self.dry_run else ""
                         if not self.dry_run and self.notifier.is_configured:
-                            self.notifier.send_message(
-                                format_tp_hit_message(
-                                    tr,
-                                    "TP3",
-                                    live_c.close,
-                                    event_pnl_usd=gain_tp3_usd,
-                                    total_trade_pnl_usd=tot_usd,
-                                    current_bankroll=float(self.state["current_bankroll"]),
-                                )
+                            m_txt = format_tp_hit_message(
+                                tr,
+                                "TP3",
+                                live_c.close,
+                                event_pnl_usd=gain_tp3_usd,
+                                total_trade_pnl_usd=tot_usd,
+                                current_bankroll=float(self.state["current_bankroll"]),
                             )
+                            if demo_note:
+                                m_txt += f"\n\n{demo_note}"
+                            self.notifier.send_message(m_txt)
                             print(f"[TELEGRAM GÖNDERİLDİ] TP3 Vuruldu -> {sym} ({direction}) (+{gain_tp3_usd:.2f}$)")
                         del tracked_trades[tid]
 
@@ -553,6 +573,10 @@ class ScannerEngine:
                     and "STAGE_2" not in already_sent
                 ):
                     msg = format_setup_message(setup, "STAGE_1", current_bankroll=cur_bank)
+                    if not self.dry_run:
+                        _, demo_note = self.demo_trader.place_setup_order(setup, "STAGE_1", cur_bank)
+                        if demo_note:
+                            msg += f"\n\n{demo_note}"
                     if self.dry_run or not self.notifier.is_configured:
                         print(
                             f"\n[SİNYAL - AŞAMA 1] {setup.symbol} ({setup.direction} | {setup.quality_grade} %{setup.recommended_bankroll_pct}) "
@@ -597,6 +621,10 @@ class ScannerEngine:
 
                 elif setup.stage == "STAGE_2_GOLDEN_ZONE" and "STAGE_2" not in already_sent:
                     msg = format_setup_message(setup, "STAGE_2", current_bankroll=cur_bank)
+                    if not self.dry_run:
+                        _, demo_note = self.demo_trader.place_setup_order(setup, "STAGE_2", cur_bank)
+                        if demo_note:
+                            msg += f"\n\n{demo_note}"
                     if self.dry_run or not self.notifier.is_configured:
                         print(
                             f"\n[SİNYAL - AŞAMA 2 ALTIN BÖLGE] {setup.symbol} ({setup.direction} | {setup.quality_grade} %{setup.recommended_bankroll_pct}) "
@@ -745,8 +773,32 @@ class ScannerEngine:
             f"• Altın Bölgede Olan (Aşama 2): <b>{stats['active_stage2']}</b>\n"
             f"• Yeni Gönderilen Sinyal: <b>{stats['sent_stage1'] + stats['sent_stage2']}</b>\n"
             f"• Güncel Kasa: <b><code>{stats['current_bankroll']:.2f}$</code></b>\n\n"
-            f"Detaylar için /aktif veya /rapor yazabilirsin."
+            f"Detaylar için /aktif, /demo veya /rapor yazabilirsin."
         )
+
+    def format_demo_text(self) -> str:
+        cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
+        return self.demo_trader.format_demo_status_text(cur_bank)
+
+    def set_bankroll_text(self, new_bankroll: float) -> str:
+        val = max(10.0, round(float(new_bankroll), 2))
+        self.state["current_bankroll"] = val
+        self.state["day_start_bankroll"] = val
+        self._save_state()
+        return (
+            f"💼 <b>Kasa Bütçesi Güncellendi!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• <b>Yeni Kasa Bütçesi:</b> <b><code>{val:.2f}$</code></b>\n"
+            f"• <b>A+ Kalite İşlem Girişi (%20):</b> <code>{val * 0.20:.2f}$</code> Marjin (10x ile {val * 2.0:.0f}$)\n"
+            f"• <b>A Kalite İşlem Girişi (%15):</b> <code>{val * 0.15:.2f}$</code> Marjin (10x ile {val * 1.5:.0f}$)\n"
+            f"• <b>B Kalite İşlem Girişi (%8):</b> <code>{val * 0.08:.2f}$</code> Marjin (10x ile {val * 0.8:.0f}$)"
+        )
+
+    def toggle_demo_auto_text(self, enable: bool) -> str:
+        self.demo_trader.enabled = enable
+        if enable:
+            return "🟢 <b>Bybit Demo Otomatik Al-Sat AKTİF edildi!</b> Gelen sinyallerde otomatik emir açılacak."
+        return "⏸ <b>Bybit Demo Otomatik Al-Sat DURAKLATILDI!</b> Sadece Telegram sinyali ve sanal rapor gönderilecek."
 
 
 def start_health_http_server(engine: ScannerEngine, port: int) -> None:
@@ -812,6 +864,9 @@ def main() -> None:
                 get_active_cb=engine.format_active_setups_text,
                 trigger_scan_cb=engine.trigger_manual_scan_text,
                 get_report_cb=engine.format_live_report_text,
+                get_demo_cb=engine.format_demo_text,
+                set_bankroll_cb=engine.set_bankroll_text,
+                toggle_auto_cb=engine.toggle_demo_auto_text,
             )
             engine.state["last_update_id"] = engine.notifier._last_update_id
             engine._save_state()
@@ -865,6 +920,9 @@ def main() -> None:
                 get_active_cb=engine.format_active_setups_text,
                 trigger_scan_cb=engine.trigger_manual_scan_text,
                 get_report_cb=engine.format_live_report_text,
+                get_demo_cb=engine.format_demo_text,
+                set_bankroll_cb=engine.set_bankroll_text,
+                toggle_auto_cb=engine.toggle_demo_auto_text,
             )
             if engine.notifier._last_update_id != prev_upd_id:
                 engine.state["last_update_id"] = engine.notifier._last_update_id

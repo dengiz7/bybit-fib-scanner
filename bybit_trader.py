@@ -326,13 +326,14 @@ class BybitDemoTrader:
         if existing_pos:
             return False, f"ℹ️ <b>Bybit Demo:</b> #{symbol} paritesinde zaten açık pozisyon mevcut."
 
-        # 2) Toplam eşzamanlı açık pozisyon sınırı kontrolü (Kasa koruması)
-        all_pos = self.get_open_positions()
-        if len(all_pos) >= Config.MAX_CONCURRENT_DEMO_TRADES:
-            return (
-                False,
-                f"⚠️ <b>Bybit Demo Kasa Koruması:</b> Aynı anda maksimum {Config.MAX_CONCURRENT_DEMO_TRADES} açık pozisyon sınırına ulaşıldığı için #{symbol} emri pas geçildi.",
-            )
+        # 2) Eşzamanlı açık pozisyon sınırı (0 = Sınırsız, bakiye el verdiğince açar)
+        if Config.MAX_CONCURRENT_DEMO_TRADES > 0:
+            all_pos = self.get_open_positions()
+            if len(all_pos) >= Config.MAX_CONCURRENT_DEMO_TRADES:
+                return (
+                    False,
+                    f"⚠️ <b>Bybit Demo Kasa Koruması:</b> Maksimum {Config.MAX_CONCURRENT_DEMO_TRADES} açık pozisyon sınırına ulaşıldığı için #{symbol} emri pas geçildi.",
+                )
 
         # 3) Kaldıracı 25x (veya parite üst limiti) ayarla ve lot kurallarını çek
         eff_lev = self.ensure_leverage(symbol, lev)
@@ -350,9 +351,13 @@ class BybitDemoTrader:
             qty_str = spec["minOrderQty"]
 
         side = "Buy" if setup.direction == "LONG" else "Sell"
+        close_side = "Sell" if setup.direction == "LONG" else "Buy"
         sl_str = self.round_step(setup.fib.stop_loss, spec["tickSize"], round_down=(setup.direction == "LONG"))
+        tp1_str = self.round_step(setup.fib.level_0, spec["tickSize"], round_down=(setup.direction == "SHORT"))
+        tp2_str = self.round_step(setup.fib.level_neg_05, spec["tickSize"], round_down=(setup.direction == "SHORT"))
+        tp3_str = self.round_step(setup.fib.level_neg_10, spec["tickSize"], round_down=(setup.direction == "SHORT"))
 
-        # STAGE_2 (Fiyat 0.500 - 0.618 Altın Bölgeye Girdi!) -> Anında aktif pozisyon aç + Otomatik SL koy
+        # STAGE_2 (Fiyat 0.500 - 0.618 Altın Bölgeye Girdi!) -> Anında aktif pozisyon aç + Otomatik TP ve SL koy
         self.cancel_all_symbol_orders(symbol)
         order_params = {
             "category": "linear",
@@ -360,7 +365,9 @@ class BybitDemoTrader:
             "side": side,
             "orderType": "Market",
             "qty": qty_str,
+            "takeProfit": tp3_str,
             "stopLoss": sl_str,
+            "tpTriggerBy": "LastPrice",
             "slTriggerBy": "LastPrice",
             "positionIdx": 0,
         }
@@ -368,8 +375,9 @@ class BybitDemoTrader:
         if res.get("retCode") == 0:
             return (
                 True,
-                f"🤖 <b>BYBIT DEMO OTOMATİK POZİSYON AÇILDI!</b>\n"
+                f"🤖 <b>BYBIT DEMO OTOMATİK POZİSYON + TP/SL AÇILDI!</b>\n"
                 f"  • <b>Tür:</b> <code>Altın Bölge Girişi ({side})</code> | <b>Miktar:</b> <code>{qty_str}</code>\n"
+                f"  • <b>Kademeli TP1 / TP2 / TP3:</b> <code>{tp1_str}</code> / <code>{tp2_str}</code> / <code>{tp3_str}</code>\n"
                 f"  • <b>Otomatik Stop-Loss:</b> <code>{sl_str}</code>\n"
                 f"  • <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> (Kasanın %{alloc_pct}'i | {eff_lev}x ➡️ <code>{notional_usd:.0f}$</code> Büyüklük)",
             )
@@ -498,6 +506,107 @@ class BybitDemoTrader:
 
         return ""
 
+    def sync_and_protect_open_positions(self, tracked_trades: Dict[str, Dict]) -> None:
+        """
+        Bybit Demo hesabındaki açık pozisyonları her taramada kontrol eder:
+        - Eğer bir pozisyonda TP veya SL boşsa (ör. SOLUSDT veya yeniden başlatma sonrası kalan pozisyonlar),
+          otomatik olarak TP ve SL değerlerini Bybit üzerine yazar ve takip listesine alır!
+        """
+        if not self.is_configured or not self.enabled:
+            return
+
+        open_positions = self.get_open_positions()
+        if not open_positions:
+            return
+
+        # Sembol bazında mevcut takip edilen işlemleri eşle
+        tracked_by_sym: Dict[str, Dict] = {
+            tr.get("symbol", ""): tr for tr in tracked_trades.values() if tr.get("symbol")
+        }
+
+        for pos in open_positions:
+            sym = str(pos.get("symbol") or "")
+            if not sym:
+                continue
+            side = str(pos.get("side") or "Buy")
+            direction = "LONG" if side == "Buy" else "SHORT"
+            avg_price = float(pos.get("avgPrice") or 0.0)
+            if avg_price <= 0:
+                continue
+
+            cur_tp = str(pos.get("takeProfit") or "").strip()
+            cur_sl = str(pos.get("stopLoss") or "").strip()
+            has_tp = bool(cur_tp and float(cur_tp) > 0)
+            has_sl = bool(cur_sl and float(cur_sl) > 0)
+
+            spec = self.get_instrument_spec(sym)
+            tr = tracked_by_sym.get(sym)
+
+            if tr is not None:
+                target_tp = float(tr.get("tp3") or tr.get("tp1") or 0.0)
+                target_sl = float(tr.get("current_sl") or tr.get("initial_sl") or 0.0)
+            else:
+                # Takip listesinde olmayan (eskiden kalmış, ör. SOLUSDT) pozisyon için otomatik koruma (1:1.5 -> 1:3 RRR)
+                sl_dist = avg_price * 0.011  # %1.1 Stop mesafesi
+                tp1_dist = avg_price * 0.0165  # %1.65 TP1 (1.5R)
+                tp2_dist = avg_price * 0.028   # %2.80 TP2 (2.5R)
+                tp3_dist = avg_price * 0.040   # %4.00 TP3 (3.6R)
+                if direction == "LONG":
+                    target_sl = avg_price - sl_dist
+                    tp1_v, tp2_v, target_tp = avg_price + tp1_dist, avg_price + tp2_dist, avg_price + tp3_dist
+                else:
+                    target_sl = avg_price + sl_dist
+                    tp1_v, tp2_v, target_tp = avg_price - tp1_dist, avg_price - tp2_dist, avg_price - tp3_dist
+
+                tid = f"{sym}_{direction}_SYNCED"
+                tracked_trades[tid] = {
+                    "symbol": sym,
+                    "direction": direction,
+                    "status": "IN_TRADE",
+                    "origin_ts": int(time.time() * 1000) - 900_000,
+                    "bos_ts": int(time.time() * 1000) - 600_000,
+                    "extreme_ts": int(time.time() * 1000) - 300_000,
+                    "zone_entry_ts": int(time.time() * 1000) - 300_000,
+                    "broken_price": tp1_v,
+                    "level_1": target_sl,
+                    "entry_0618": avg_price,
+                    "level_0500": avg_price,
+                    "initial_sl": target_sl,
+                    "current_sl": target_sl,
+                    "tp1": tp1_v,
+                    "tp2": tp2_v,
+                    "tp3": target_tp,
+                    "rrr_tp1": 1.50,
+                    "rrr_tp2": 2.55,
+                    "rrr_tp3": 3.60,
+                    "rvol": 1.3,
+                    "atr_mult": 1.8,
+                    "strength_score": 75,
+                    "quality_grade": "A",
+                    "bankroll_pct": 8,
+                    "margin_usd": 8.0,
+                    "confluence_notes": ["✅ Otomatik Koruma Senkronizasyonu"],
+                    "realized_usd": 0.0,
+                    "hits": [],
+                    "ts": int(time.time() * 1000),
+                }
+
+            if (not has_tp or not has_sl) and target_tp > 0 and target_sl > 0:
+                tp_str = self.round_step(target_tp, spec["tickSize"], round_down=(direction == "SHORT"))
+                sl_str = self.round_step(target_sl, spec["tickSize"], round_down=(direction == "LONG"))
+                payload = {
+                    "category": "linear",
+                    "symbol": sym,
+                    "positionIdx": 0,
+                }
+                if not has_tp:
+                    payload["takeProfit"] = tp_str
+                    payload["tpTriggerBy"] = "LastPrice"
+                if not has_sl:
+                    payload["stopLoss"] = sl_str
+                    payload["slTriggerBy"] = "LastPrice"
+                self._request("POST", "/v5/position/trading-stop", payload, signed=True)
+
     def format_demo_status_text(self, virtual_bankroll_usd: float) -> str:
         if not self.is_configured:
             return (
@@ -518,22 +627,23 @@ class BybitDemoTrader:
         mode_str = "🟢 AKTİF (Otomatik Emir Açıyor)" if self.enabled else "⏸ DURAKLATILDI (/oto_ac ile başlat)"
 
         pos_lines = []
-        for p in open_pos[:10]:
+        for p in open_pos[:25]:
             sym = p.get("symbol")
             side = "🟢 LONG" if p.get("side") == "Buy" else "🔴 SHORT"
             sz = p.get("size")
             avg_p = p.get("avgPrice")
             upnl = float(p.get("unrealisedPnl") or 0.0)
-            sl_p = p.get("stopLoss") or "Yok"
+            tp_p = p.get("takeProfit") or "Oto"
+            sl_p = p.get("stopLoss") or "Oto"
             pos_lines.append(
                 f"  • <b>#{sym}</b> ({side}) | Miktar: <code>{sz}</code> | Giriş: <code>{avg_p}</code> | "
-                f"SL: <code>{sl_p}</code> | Anlık PnL: <b><code>{upnl:+.2f}$</code></b>"
+                f"TP/SL: <code>{tp_p} / {sl_p}</code> | PnL: <b><code>{upnl:+.2f}$</code></b>"
             )
         if not pos_lines:
             pos_lines.append("  • <i>Şu an açık Demo pozisyon bulunmuyor.</i>")
 
         ord_lines = []
-        for o in open_orders[:10]:
+        for o in open_orders[:15]:
             sym = o.get("symbol")
             side = "🟢 Alış" if o.get("side") == "Buy" else "🔴 Satış"
             pr = o.get("price")
@@ -542,15 +652,21 @@ class BybitDemoTrader:
         if not ord_lines:
             ord_lines.append("  • <i>Şu an bekleyen Limit emir bulunmuyor.</i>")
 
+        limit_str = (
+            str(Config.MAX_CONCURRENT_DEMO_TRADES)
+            if Config.MAX_CONCURRENT_DEMO_TRADES > 0
+            else "Sınırsız (Bakiye El Verdiğince Açar)"
+        )
+
         return (
             f"🤖 <b>BYBIT DEMO HESABI VE OTOMATİK İŞLEM RAPORU</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"⚙️ <b>Otomatik Al-Sat:</b> {mode_str}\n"
             f"💼 <b>Botun Kullandığı Kasa Bütçesi:</b> <b><code>{virtual_bankroll_usd:.2f}$</code></b> <i>(İstediğin an <code>/kasa 100</code> yazarak sıfırlayabilirsin)</i>\n"
             f"🏦 <b>Bybit Demo Cüzdan Bakiyesi:</b> <code>{wallet_str}</code>\n"
-            f"🛡 <b>Maks. Eşzamanlı İşlem Sınırı:</b> <code>{Config.MAX_CONCURRENT_DEMO_TRADES}</code>\n\n"
+            f"🛡 <b>Eşzamanlı İşlem Sınırı:</b> <code>{limit_str}</code>\n\n"
             f"📈 <b>AÇIK DEMO POZİSYONLAR ({len(open_pos)}):</b>\n"
             + "\n".join(pos_lines)
-            + f"\n\n⏳ <b>BEKLEYEN 0.618 LİMİT EMİRLER ({len(open_orders)}):</b>\n"
+            + f"\n\n⏳ <b>BEKLEYEN LİMİT EMİRLER ({len(open_orders)}):</b>\n"
             + "\n".join(ord_lines)
         )

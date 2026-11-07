@@ -243,6 +243,10 @@ class ScannerEngine:
             flip_watch: Dict[str, Dict] = self.state["flip_watch"]
             tracked_trades: Dict[str, Dict] = self.state.setdefault("tracked_trades", {})
 
+            # 0) Bybit Demo hesabındaki açık pozisyonlarda eksik TP/SL varsa (ör. SOLUSDT) otomatik tamamla ve takibe al!
+            if not self.dry_run:
+                self.demo_trader.sync_and_protect_open_positions(tracked_trades)
+
             # 1) Önce pusuda bekleyen (WAITING_ZONE) veya aktif işlemde olan (IN_TRADE) tüm kurulumları takip et
             for tid, tr in list(tracked_trades.items()):
                 sym = tr.get("symbol")

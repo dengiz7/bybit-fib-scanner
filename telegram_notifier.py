@@ -206,8 +206,9 @@ def format_tp_hit_message(
     tp2 = float(trade["tp2"])
     tp3 = float(trade["tp3"])
     grade = trade.get("quality_grade", "A")
-    alloc_pct = int(trade.get("bankroll_pct", 15))
-    margin_usd = float(trade.get("margin_usd", 15.0))
+    alloc_pct = int(trade.get("bankroll_pct", 6))
+    margin_usd = float(trade.get("margin_usd", 6.0))
+    lev = Config.DEFAULT_LEVERAGE
     dir_emoji = "🟢" if direction == "LONG" else "🔴"
 
     if tp_stage == "TP1":
@@ -216,7 +217,7 @@ def format_tp_hit_message(
             f"✅ <b>TP1 (0.0 GÜVENLİ HEDEF) VURULDU! — #{symbol}</b> ({dir_emoji} {direction} | {grade} Kalite)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🎯 <b>0.618 Giriş:</b> <code>{fmt_price(entry)}</code> ➡️ <b>TP1:</b> <code>{fmt_price(tp1)}</code>\n"
-            f"📈 <b>Hareket:</b> Spot <code>+%{pct:.2f}</code> | 10x Kaldıraç: <b>+%{pct * 10:.1f}</b> (<b>1 : 1.50 RRR</b>)\n"
+            f"📈 <b>Hareket:</b> Spot <code>+%{pct:.2f}</code> | {lev}x Kaldıraç: <b>+%{pct * lev:.1f}</b> (<b>1 : 1.50 RRR</b>)\n"
             f"💵 <b>Kasa Etkisi (%{alloc_pct} / {margin_usd:.1f}$ Girişle):</b>\n"
             f"  • Cebe Giren (%50 Kapanış): <b><code>{fmt_usd_signed(event_pnl_usd)}</code></b>\n"
             f"  • Güncel Kasa: <b><code>{current_bankroll:.2f}$</code></b>\n\n"
@@ -231,7 +232,7 @@ def format_tp_hit_message(
             f"🚀 <b>TP2 (-0.5 UZATMA HEDEFİ) VURULDU! — #{symbol}</b> ({dir_emoji} {direction} | {grade} Kalite)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🎯 <b>0.618 Giriş:</b> <code>{fmt_price(entry)}</code> ➡️ <b>TP2:</b> <code>{fmt_price(tp2)}</code>\n"
-            f"📈 <b>Hareket:</b> Spot <code>+%{pct:.2f}</code> | 10x Kaldıraç: <b>+%{pct * 10:.1f}</b> (<b>1 : 2.71 RRR</b>)\n"
+            f"📈 <b>Hareket:</b> Spot <code>+%{pct:.2f}</code> | {lev}x Kaldıraç: <b>+%{pct * lev:.1f}</b> (<b>1 : 2.71 RRR</b>)\n"
             f"💵 <b>Kasa Etkisi:</b>\n"
             f"  • Bu Kademeden Eklenen (%25): <b><code>{fmt_usd_signed(event_pnl_usd)}</code></b>\n"
             f"  • Bu İşlemden Toplam Kâr: <b><code>{fmt_usd_signed(total_trade_pnl_usd)}</code></b>\n"
@@ -247,7 +248,7 @@ def format_tp_hit_message(
             f"🏆 <b>TP3 (-1.0 TAM UZATMA HEDEFİ) VURULDU! — #{symbol}</b> ({dir_emoji} {direction} | {grade} Kalite)\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🎯 <b>0.618 Giriş:</b> <code>{fmt_price(entry)}</code> ➡️ <b>TP3:</b> <code>{fmt_price(tp3)}</code>\n"
-            f"📈 <b>Toplam Hareket:</b> Spot <code>+%{pct:.2f}</code> | 10x Kaldıraç: <b>+%{pct * 10:.1f}</b> (<b>1 : 3.93 RRR</b>)\n"
+            f"📈 <b>Toplam Hareket:</b> Spot <code>+%{pct:.2f}</code> | {lev}x Kaldıraç: <b>+%{pct * lev:.1f}</b> (<b>1 : 3.93 RRR</b>)\n"
             f"💵 <b>Kasa Etkisi:</b>\n"
             f"  • Son Kademe (%25): <b><code>{fmt_usd_signed(event_pnl_usd)}</code></b>\n"
             f"  • İşlem Toplam Net Kârı: <b><code>{fmt_usd_signed(total_trade_pnl_usd)}</code></b>\n"

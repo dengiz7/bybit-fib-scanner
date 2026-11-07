@@ -348,7 +348,7 @@ class ScannerEngine:
                                 score = min(100, score + 10)
                                 notes.append("✅ Altın Bölge Mum Onaylı (Pin Bar/Engulfing)")
                             grade = "A+" if score >= 80 else ("A" if score >= 65 else "B")
-                            bank_pct = 20 if grade == "A+" else (15 if grade == "A" else 8)
+                            bank_pct = 8 if grade == "A+" else (6 if grade == "A" else 4)
                             cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
                             tr["strength_score"] = score
                             tr["quality_grade"] = grade
@@ -789,9 +789,9 @@ class ScannerEngine:
             f"💼 <b>Kasa Bütçesi Güncellendi!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"• <b>Yeni Kasa Bütçesi:</b> <b><code>{val:.2f}$</code></b>\n"
-            f"• <b>A+ Kalite İşlem Girişi (%20):</b> <code>{val * 0.20:.2f}$</code> Marjin (10x ile {val * 2.0:.0f}$)\n"
-            f"• <b>A Kalite İşlem Girişi (%15):</b> <code>{val * 0.15:.2f}$</code> Marjin (10x ile {val * 1.5:.0f}$)\n"
-            f"• <b>B Kalite İşlem Girişi (%8):</b> <code>{val * 0.08:.2f}$</code> Marjin (10x ile {val * 0.8:.0f}$)"
+            f"• <b>A+ Kalite İşlem Girişi (%8):</b> <code>{val * 0.08:.2f}$</code> Marjin (25x ile {val * 2.0:.0f}$ Büyüklük)\n"
+            f"• <b>A Kalite İşlem Girişi (%6):</b> <code>{val * 0.06:.2f}$</code> Marjin (25x ile {val * 1.5:.0f}$ Büyüklük)\n"
+            f"• <b>B Kalite İşlem Girişi (%4):</b> <code>{val * 0.04:.2f}$</code> Marjin (25x ile {val * 1.0:.0f}$ Büyüklük)"
         )
 
     def toggle_demo_auto_text(self, enable: bool) -> str:
@@ -893,15 +893,20 @@ def main() -> None:
         )
     else:
         engine.notifier.register_bot_commands()
+        cleared = engine.demo_trader.cancel_all_open_orders() if not args.dry_run else 0
         engine.notifier.send_message(
-            "🟢 <b>Bybit 15dk Fibonacci + SMC/ICT Kasa Yönetimli Tarayıcı Güncellendi!</b>\n"
+            "🟢 <b>Bybit 15dk Fibonacci + 25x Kaldıraçlı Kasa Yönetimi Aktif!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "✨ <b>Yeni Özellikler Aktif:</b>\n"
-            "  • 🧠 <b>SMC/ICT Güç Skoru (0–100 Puan):</b> FVG, Order Block, EMA 50/200 ve RVOL kesişimi\n"
-            "  • 💼 <b>Otomatik Kasa Yüzdesi:</b> Kaliteye göre (<code>A+ -> %20</code>, <code>A -> %15</code>, <code>B -> %8</code>) giriş ve net $ kâr/risk hesabı\n"
-            "  • ⏰ <b>Saat Başı Rapor:</b> Her saat başı o saat içindeki TP/SL'ler + Günün genel durumu\n"
-            "  • 🏁 <b>Gün Sonu Bilançosu:</b> Her gece 00:00'da toplam TP, SL ve net $ kasa kazancı\n"
-            "  • 📊 İstediğin an canlı tablo için: /rapor"
+            "✨ <b>Yeni Kaldıraç ve Kasa Optimizasyonu:</b>\n"
+            "  • ⚡ <b>Kaldıraç:</b> <code>25x İzole</code> (Aynı yüksek $ kârı, 2.5 kat daha az teminat bağlama!)\n"
+            "  • 💼 <b>Giriş Oranları (100$ Kasa):</b>\n"
+            "     🔥 <b>A+ Kalite:</b> <code>%8 Marjin (8$ ➡️ 200$ Pozisyon)</code>\n"
+            "     ⚡ <b>A Kalite:</b> <code>%6 Marjin (6$ ➡️ 150$ Pozisyon)</code>\n"
+            "     ⚖️ <b>B Kalite:</b> <code>%4 Marjin (4$ ➡️ 100$ Pozisyon)</code>\n"
+            "  • 🛡 <b>Teminat Kilitleme Koruması:</b> Uzaktaki Aşama 1 kurulumlarına limit emir dizip bakiyeyi kilitlemez; "
+            "sadece fiyat <code>0.500 – 0.618</code> Altın Bölgeye girdiğinde pozisyon açar!\n"
+            f"  • 🧹 Teminatı kilitleyen eski bekleyen limit emirler temizlendi (<code>{cleared} adet</code>).\n"
+            "  • 📊 Canlı durum için: /demo ve /rapor"
         )
 
     start_health_http_server(engine, Config.PORT)

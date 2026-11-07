@@ -220,13 +220,13 @@ def evaluate_confluence_score(
 
     if score >= 80:
         grade = "A+"
-        bankroll_pct = 20  # 100$ kasada 20$ Marjin (10x İzole)
+        bankroll_pct = 8   # 100$ kasada 8$ Marjin (25x İzole = 200$ Pozisyon)
     elif score >= 65:
         grade = "A"
-        bankroll_pct = 15  # 100$ kasada 15$ Marjin (10x İzole)
+        bankroll_pct = 6   # 100$ kasada 6$ Marjin (25x İzole = 150$ Pozisyon)
     else:
         grade = "B"
-        bankroll_pct = 8   # 100$ kasada 8$ Marjin (10x İzole)
+        bankroll_pct = 4   # 100$ kasada 4$ Marjin (25x İzole = 100$ Pozisyon)
 
     return score, grade, bankroll_pct, notes
 

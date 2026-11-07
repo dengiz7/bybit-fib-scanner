@@ -76,6 +76,10 @@ class Config:
     MIN_TP1_PCT: float = float(os.getenv("MIN_TP1_PCT", "0.85"))
     MIN_TP1_PCT_MAJORS: float = float(os.getenv("MIN_TP1_PCT_MAJORS", "0.55"))  # BTC, ETH, SOL, XRP, BNB için alt sınır
 
+    # --- Kasa Yönetimi ve Pozisyon Büyüklüğü (100$ Baz Kasa & 10x İzole Kaldıraç) ---
+    DEFAULT_BANKROLL_USD: float = float(os.getenv("DEFAULT_BANKROLL_USD", "100.0"))
+    DEFAULT_LEVERAGE: int = int(os.getenv("DEFAULT_LEVERAGE", "10"))
+
     # --- Videodaki 6 Özel Fibonacci Seviyesi (Video 1 [03:52] & Video 2 [06:01]) ---
     FIB_LEVEL_1: float = 1.000       # İtkisel hareketin başlangıcı (Stop-Loss referansı)
     FIB_LEVEL_0618: float = 0.618    # Altın Cep (Golden Pocket) - Ana Limit Emir Giriş Seviyesi

@@ -64,6 +64,10 @@ class FibSetup:
     turnover_24h: float = 0.0
     session_label: str = ""
     is_trend_flip: bool = False
+    strength_score: int = 65
+    quality_grade: str = "A"
+    recommended_bankroll_pct: int = 15
+    confluence_notes: Optional[List[str]] = None
 
 
 def compute_atr(candles: List[Candle], end_idx: int, period: int = Config.ATR_PERIOD) -> float:
@@ -89,6 +93,142 @@ def compute_avg_volume(candles: List[Candle], end_idx: int, period: int = Config
     if not segment:
         return 0.0
     return sum(c.volume for c in segment) / len(segment)
+
+
+def compute_ema(candles: List[Candle], period: int) -> float:
+    """Kapanış fiyatları üzerinden Üstel Hareketli Ortalama (EMA) hesaplar."""
+    if not candles:
+        return 0.0
+    if len(candles) <= period:
+        return sum(c.close for c in candles) / len(candles)
+    k = 2.0 / (period + 1.0)
+    ema = sum(c.close for c in candles[:period]) / period
+    for c in candles[period:]:
+        ema = c.close * k + ema * (1.0 - k)
+    return ema
+
+
+def evaluate_confluence_score(
+    closed_candles: List[Candle],
+    origin_idx: int,
+    peak_idx: int,
+    fib: FibLevels,
+    direction: str,
+    rvol: float,
+    impulse_atr_mult: float,
+    efficiency: float,
+    candle_confirmation: Optional[str],
+    is_trend_flip: bool,
+) -> tuple[int, str, int, List[str]]:
+    """
+    Ana Fibonacci stratejisini çorbaya çevirmeden, kurumsal SMC / ICT ve Trend kesişimlerini
+    puanlar (40 - 100 Puan) ve kasanın yüzde kaçıyla girilmesi gerektiğini belirler.
+    Dönüş: (score, grade, bankroll_pct, notes_list)
+    """
+    score = 45  # Temel Arty Fibonacci + BoS + ATR + Verimlilik + Kâr Filtresi taban puanı
+    notes: List[str] = ["✅ Temel Fib + Mum Kapanışlı BoS"]
+
+    leg = abs(fib.level_0 - fib.level_1)
+    gz_low = min(fib.level_0500, fib.level_0618) - 0.10 * leg
+    gz_high = max(fib.level_0500, fib.level_0618) + 0.10 * leg
+
+    # 1) ICT Fair Value Gap (FVG / İmbalans Boşluğu) Kesişimi (+20 Puan)
+    has_fvg_in_gz = False
+    has_any_fvg = False
+    for i in range(max(2, origin_idx + 1), min(len(closed_candles), peak_idx + 1)):
+        c_prev2 = closed_candles[i - 2]
+        c_curr = closed_candles[i]
+        if direction == "LONG" and c_curr.low > c_prev2.high:
+            has_any_fvg = True
+            fvg_bot, fvg_top = c_prev2.high, c_curr.low
+            if max(fvg_bot, gz_low) <= min(fvg_top, gz_high):
+                has_fvg_in_gz = True
+                break
+        elif direction == "SHORT" and c_curr.high < c_prev2.low:
+            has_any_fvg = True
+            fvg_bot, fvg_top = c_curr.high, c_prev2.low
+            if max(fvg_bot, gz_low) <= min(fvg_top, gz_high):
+                has_fvg_in_gz = True
+                break
+
+    if has_fvg_in_gz:
+        score += 20
+        notes.append("✅ Altın Bölgede FVG (İmbalans Mıknatısı)")
+    elif has_any_fvg:
+        score += 10
+        notes.append("✅ İtkisel Dalgada FVG Boşluğu")
+
+    # 2) SMC Order Block (OB / Kurumsal Emir Bloğu Kalkanı) (+15 Puan)
+    has_ob_shield = False
+    ob_start = max(0, origin_idx - 2)
+    ob_end = min(len(closed_candles) - 1, origin_idx + 2)
+    for i in range(ob_start, ob_end + 1):
+        c = closed_candles[i]
+        if direction == "LONG" and c.close < c.open:
+            # Son satıcılı mumun gövde/fitil tavanı 0.618 - 1.000 arasını koruyor mu?
+            if c.high >= fib.level_1 and c.low <= fib.level_0618:
+                has_ob_shield = True
+                break
+        elif direction == "SHORT" and c.close > c.open:
+            if c.low <= fib.level_1 and c.high >= fib.level_0618:
+                has_ob_shield = True
+                break
+
+    if has_ob_shield:
+        score += 15
+        notes.append("✅ 0.618 Arkasında Order Block (OB) Kalkanı")
+
+    # 3) Ana Trend (EMA 50 & EMA 200) Uyumu (+10 Puan)
+    ema50 = compute_ema(closed_candles, 50)
+    ema200 = compute_ema(closed_candles, 200)
+    last_close = closed_candles[-1].close
+    if direction == "LONG":
+        if last_close >= ema50 and ema50 >= ema200:
+            score += 10
+            notes.append("✅ EMA 50/200 Ana Yükseliş Trendi Uyumu")
+        elif last_close >= ema50:
+            score += 6
+            notes.append("✅ EMA 50 Trend Uyumu")
+        else:
+            notes.append("⚠️ Ana Trende Karşı (Tepki/Dönüş İşlemi)")
+    else:
+        if last_close <= ema50 and ema50 <= ema200:
+            score += 10
+            notes.append("✅ EMA 50/200 Ana Düşüş Trendi Uyumu")
+        elif last_close <= ema50:
+            score += 6
+            notes.append("✅ EMA 50 Trend Uyumu")
+        else:
+            notes.append("⚠️ Ana Trende Karşı (Tepki/Dönüş İşlemi)")
+
+    # 4) Hacim Patlaması (RVOL) ve İtkisel Momentum (+10 Puan)
+    if rvol >= 1.50 or (impulse_atr_mult >= 2.2 and efficiency >= 0.55):
+        score += 10
+        notes.append(f"✅ Kurumsal Hacim & Momentum ({rvol:.1f}x RVOL)")
+    elif rvol >= 1.25:
+        score += 5
+
+    # 5) Altın Bölge Mum Onayı (Pin Bar / Engulfing) veya Trend Flip (+10 Puan)
+    if candle_confirmation:
+        score += 10
+        notes.append("✅ Altın Bölge Mum Onaylı (Pin Bar/Engulfing)")
+    elif is_trend_flip:
+        score += 5
+        notes.append("✅ Stop Sonrası Taze Trend Dönüşü (Flip)")
+
+    score = min(100, max(40, score))
+
+    if score >= 80:
+        grade = "A+"
+        bankroll_pct = 20  # 100$ kasada 20$ Marjin (10x İzole)
+    elif score >= 65:
+        grade = "A"
+        bankroll_pct = 15  # 100$ kasada 15$ Marjin (10x İzole)
+    else:
+        grade = "B"
+        bankroll_pct = 8   # 100$ kasada 8$ Marjin (10x İzole)
+
+    return score, grade, bankroll_pct, notes
 
 
 def get_session_label(now_utc: Optional[datetime] = None) -> str:
@@ -538,6 +678,19 @@ def _evaluate_candidate(
         or (direction == "SHORT" and flipped_from_direction == "LONG")
     )
 
+    strength_score, quality_grade, bankroll_pct, conf_notes = evaluate_confluence_score(
+        closed_candles=closed_candles,
+        origin_idx=origin_sw.idx,
+        peak_idx=peak_idx,
+        fib=fib,
+        direction=direction,
+        rvol=rvol,
+        impulse_atr_mult=impulse_atr_mult,
+        efficiency=efficiency,
+        candle_confirmation=confirmation,
+        is_trend_flip=is_flip,
+    )
+
     return FibSetup(
         setup_id=f"{symbol}_{direction}_{origin_sw.timestamp}",
         symbol=symbol,
@@ -561,6 +714,10 @@ def _evaluate_candidate(
         turnover_24h=ticker.turnover_24h,
         session_label=get_session_label(),
         is_trend_flip=is_flip,
+        strength_score=strength_score,
+        quality_grade=quality_grade,
+        recommended_bankroll_pct=bankroll_pct,
+        confluence_notes=conf_notes,
     )
 
 

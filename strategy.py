@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-Hacim Patlaması ve Zirve Kırılımı (RVOL Breakout Sniper) Strateji Motoru
+Hacim Patlaması ve Zirve Kırılımı (RVOL Breakout Sniper) + Akıllı Risk Filtresi Motoru
 - 15 Dakikalık Mumlar Üzerinde Donchian (20 Mum) Tavan / Taban Kırılımlarını Tarar
 - Şart 1: Fiyat son 20 mumun (5 saat) zirvesini yukarı (LONG) veya tabanını aşağı (SHORT) kırmalıdır.
 - Şart 2: Kırılım mumu güçlü olmalı (Gövde boyu >= %45, sadece fitil değil, net kapanış!).
-- Şart 3: Kırılım mumu 20 mumluk ortalama hacmin en az 1.8x - 2.0x katı olmalı (RVOL >= 1.8).
-- Şart 4: Komisyonu ezen net kâr hedefi: TP1 en az %1.40 saf fiyat hareketi (15x ile +%21+ kâr).
-- Kâr Alma & Koruma: TP1'de %75 kâr cebe kilitlenir, Stop girişe (Başabaş) çekilir, kalan %25 TP2'ye koşar.
+- Şart 3: Kırılım mumu 20 mumluk ortalama hacmin en az 1.8x katı olmalı (RVOL >= 1.8).
+- Şart 4: FİLTRE — Kırılım mumunda ters yönde uzun fitil (rejection / tepeden/dipten ret) olmamalı!
+- Şart 5: FİLTRE — Fiyat kırılım seviyesinden ATR'nin 1.4 katından fazla uzaklaşmamış olmalı (Geç kalınmış sinyalleri reddet).
+- Şart 6: FİLTRE — 1 Saatlik Genel Trend (48-Mum EMA) yönünde olmalı (Trend tersi zayıf tepkileri reddet).
+- Şart 7: FİLTRE — Son mumlarda tükenme (Exhaustion / RSI 74+ veya 26-) olmamalı.
+- Şart 8: FİLTRE — BTC ani ters yönde hareket etmiyor olmalı.
 """
 
 from dataclasses import dataclass
@@ -64,6 +67,37 @@ def compute_volume_sma(candles: List[Candle], period: int = 20) -> float:
     return sum(c.volume for c in seg) / len(seg) if seg else 0.0
 
 
+def compute_rsi(candles: List[Candle], period: int = 14) -> float:
+    if len(candles) < period + 1:
+        return 50.0
+    gains = []
+    losses = []
+    for i in range(len(candles) - period, len(candles)):
+        chg = candles[i].close - candles[i - 1].close
+        if chg > 0:
+            gains.append(chg)
+            losses.append(0.0)
+        else:
+            gains.append(0.0)
+            losses.append(abs(chg))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    if avg_loss == 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def compute_ema(candles: List[Candle], period: int = 48) -> float:
+    if len(candles) < period:
+        return 0.0
+    k = 2.0 / (period + 1.0)
+    ema = candles[0].close
+    for c in candles[1:]:
+        ema = (c.close * k) + (ema * (1.0 - k))
+    return ema
+
+
 def get_session_label(now_utc: Optional[datetime] = None) -> str:
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -82,8 +116,9 @@ def analyze_breakout(
     candles: List[Candle],
     ticker: TickerInfo,
     bankroll_usd: float = Config.DEFAULT_BANKROLL_USD,
+    btc_regime: Optional[str] = None,
 ) -> Optional[BreakoutSetup]:
-    """15 dakikalık mumlarda Hacim Patlamalı 20-Mum Zirve/Taban Kırılımını analiz eder."""
+    """15 dakikalık mumlarda Hacim Patlamalı 20-Mum Zirve/Taban Kırılımını ve Akıllı Risk Filtrelerini analiz eder."""
     lookback = Config.BREAKOUT_LOOKBACK
     if len(candles) < lookback + 15:
         return None
@@ -91,15 +126,14 @@ def analyze_breakout(
     closed = candles[:-1]
     live_c = candles[-1]
     c = closed[-1]       # Yeni kapanan kırılım adayı mumu
-    prev = closed[-2]
 
     atr = compute_atr(closed, 14)
     if atr <= 0:
         return None
 
-    # Devasa anormal manipülasyon mumu varsa (tek mum > 4.5x ATR) ele
+    # Devasa anormal manipülasyon mumu varsa (tek mum > 4.2x ATR) ele
     candle_range = max(1e-12, c.high - c.low)
-    if candle_range > 4.5 * atr:
+    if candle_range > 4.2 * atr:
         return None
 
     # Hacim Hesabı
@@ -144,6 +178,49 @@ def analyze_breakout(
     if direction is None:
         return None
 
+    # ------------------------------------------------------------------
+    # 🛡️ AKILLI RİSK FİLTRESİ (RISK FILTER RULES - ŞÜPHEDEYSEN REDDET)
+    # ------------------------------------------------------------------
+
+    # Kural 1: Ters Yöndeki Fitil Uzunsa (Rejection / Tepeden/Tabandan Ret Yemiş Mum) -> REDDET!
+    if direction == "LONG":
+        upper_wick = c.high - c.close
+        if upper_wick > Config.MAX_REJECTION_WICK_RATIO * candle_range:
+            return None  # Tepeden güçlü ret fitili var, sahte kırılım, REDDET!
+    elif direction == "SHORT":
+        lower_wick = c.close - c.low
+        if lower_wick > Config.MAX_REJECTION_WICK_RATIO * candle_range:
+            return None  # Tabandan güçlü ret fitili var, sahte kırılım, REDDET!
+
+    # Kural 2: Fiyat Kırılım Seviyesinden Zaten Çok Uzaklaşmışsa (Chase / Geç Kalınmış Sinyal) -> REDDET!
+    dist_from_breakout = abs(c.close - breakout_level)
+    if dist_from_breakout > Config.MAX_BREAKOUT_ATR_DIST * atr:
+        return None  # Fiyat çoktan fırlamış, tepeden/dipten yakalanma, REDDET!
+
+    # Kural 3: 1 Saatlik Genel Trend Uyumu (48 Mum = 12 Saatlik EMA Trend Filtresi)
+    ema_trend = compute_ema(closed, 48)
+    if ema_trend > 0:
+        if direction == "LONG" and c.close < ema_trend:
+            return None  # 1 Saatlik genel düşüş trendinin tersine cılız kırılım, REDDET!
+        elif direction == "SHORT" and c.close > ema_trend:
+            return None  # 1 Saatlik genel yükseliş trendinin tersine cılız kırılım, REDDET!
+
+    # Kural 4: Tükenme (Exhaustion / RSI Aşırı Şişme) Filtresi
+    rsi_14 = compute_rsi(closed, 14)
+    if direction == "LONG" and rsi_14 > 74.0:
+        return None  # Aşırı alım tükeniş bölgesi, REDDET!
+    elif direction == "SHORT" and rsi_14 < 26.0:
+        return None  # Aşırı satım tükeniş bölgesi, REDDET!
+
+    # Kural 5: BTC Piyasa Rejimi / Korelasyon Filtresi
+    if btc_regime == "BTC_DUMP" and direction == "LONG":
+        return None  # BTC sert çakılırken altcoin LONG'u REDDET!
+    elif btc_regime == "BTC_PUMP" and direction == "SHORT":
+        return None  # BTC sert fırlarken altcoin SHORT'u REDDET!
+
+    # ------------------------------------------------------------------
+    # FİYAT HEDEFLERİ & KÂR/ZARAR PLANI
+    # ------------------------------------------------------------------
     entry_p = c.close
     tp1_dist = max(Config.TP1_ATR_MULT * atr, entry_p * (Config.MIN_TP1_MOVE_PCT / 100.0))
     tp2_dist = max(Config.TP2_ATR_MULT * atr, tp1_dist * 1.75)
@@ -220,6 +297,7 @@ def analyze_symbol(
     candles: List[Candle],
     ticker: TickerInfo,
     bankroll_usd: float = Config.DEFAULT_BANKROLL_USD,
+    btc_regime: Optional[str] = None,
 ) -> Optional[BreakoutSetup]:
-    """Ana Tarama Arayüzü: Hacim Patlamalı Kırılımı analiz eder."""
-    return analyze_breakout(symbol, candles, ticker, bankroll_usd)
+    """Ana Tarama Arayüzü: Hacim Patlamalı Kırılımı ve Risk Filtrelerini analiz eder."""
+    return analyze_breakout(symbol, candles, ticker, bankroll_usd, btc_regime)

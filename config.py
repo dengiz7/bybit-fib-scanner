@@ -57,8 +57,8 @@ class Config:
 
     # --- Borsa ve Tarama Ayarları (Bybit USDT Linear Perpetual) ---
     TIMEFRAME: str = os.getenv("TIMEFRAME", "15")  # 15 dakikalık mumlar (Hızlı hacim kırılımları)
-    TOP_SYMBOLS_COUNT: int = int(os.getenv("TOP_SYMBOLS_COUNT", "65"))  # En yüksek hacimli ilk 65 USDT paritesi
-    MIN_24H_TURNOVER_USD: float = float(os.getenv("MIN_24H_TURNOVER_USD", "8000000"))  # Min 8M$ 24s hacim (Likidite şartı)
+    TOP_SYMBOLS_COUNT: int = int(os.getenv("TOP_SYMBOLS_COUNT", "40"))  # En yüksek hacimli ilk 40 ana coin (Gereksiz çöp altcoinleri eler!)
+    MIN_24H_TURNOVER_USD: float = float(os.getenv("MIN_24H_TURNOVER_USD", "25000000"))  # Min 25M$ 24s hacim (Likidite şartı)
     KLINE_LIMIT: int = 200  # Çekilecek mum sayısı
     SCAN_INTERVAL_SECONDS: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))  # Tarama döngü süresi (sn)
 
@@ -71,6 +71,13 @@ class Config:
     TP2_ATR_MULT: float = float(os.getenv("TP2_ATR_MULT", "2.80"))  # TP2: 2.8x ATR
     SL_ATR_MULT: float = float(os.getenv("SL_ATR_MULT", "1.15"))   # SL: Kırılan seviyenin 1.15x ATR arkası
     TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "0.75"))  # TP1'de pozisyonun %75'ini kapat, SL'yi girişe çek!
+
+    # --- Akıllı Risk Filtresi & Erken Çıkış Parametreleri ---
+    MAX_BREAKOUT_ATR_DIST: float = float(os.getenv("MAX_BREAKOUT_ATR_DIST", "1.40"))  # Kırılım seviyesinden max 1.4x ATR uzaklaşma (Geç sinyalleri reddet)
+    MAX_REJECTION_WICK_RATIO: float = float(os.getenv("MAX_REJECTION_WICK_RATIO", "0.32"))  # Kırılım mumunda ters yöndeki fitil max %32 (Tepeden ret yemiş fitilleri reddet)
+    STAGNATION_MAX_CANDLES: int = int(os.getenv("STAGNATION_MAX_CANDLES", "10"))  # 10 mum (2.5 saat) boyunca girişte oyalanırsa başabaş kapat
+    STAGNATION_THRESHOLD_PCT: float = float(os.getenv("STAGNATION_THRESHOLD_PCT", "0.40"))  # Girişin %0.4 civarındaysa oyalanma say
+    NEAR_TP_TRIGGER_PCT: float = float(os.getenv("NEAR_TP_TRIGGER_PCT", "0.85"))  # TP1'e %85 yaklaşınca dönüş fitilinde erken kâr kilidi
 
     # --- Kasa Yönetimi ve Pozisyon Büyüklüğü (100$ Kasa & 30x İzole Kaldıraç) ---
     DEFAULT_BANKROLL_USD: float = float(os.getenv("DEFAULT_BANKROLL_USD", "100.0"))

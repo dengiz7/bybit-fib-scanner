@@ -280,6 +280,17 @@ class ScannerEngine:
                 self.sync_real_bybit_balance_and_pnl()
                 self.demo_trader.sync_and_protect_open_positions(tracked_trades)
 
+            # BTC Piyasa Rejimi / Korelasyon Kontrolü (1 saatlik yön)
+            btc_regime = "NEUTRAL"
+            if "BTCUSDT" in klines_map:
+                btc_c_list = klines_map["BTCUSDT"][1]
+                if len(btc_c_list) >= 5:
+                    btc_1h_pct = (btc_c_list[-1].close - btc_c_list[-5].close) / btc_c_list[-5].close * 100.0
+                    if btc_1h_pct < -0.80:
+                        btc_regime = "BTC_DUMP"
+                    elif btc_1h_pct > 0.80:
+                        btc_regime = "BTC_PUMP"
+
             # 1) Açık takip edilen pozisyonların TP1, TP2 ve Stop-Loss kontrolleri
             for tid, tr in list(tracked_trades.items()):
                 sym = tr.get("symbol")
@@ -309,6 +320,27 @@ class ScannerEngine:
                 pos_usd = margin_usd * trade_lev
                 hits: List[str] = tr.setdefault("hits", [])
                 cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
+
+                # --- OYALANMA / STAGNATION KONTROLÜ (2.5 saat girişte oyalanırsa başabaş kapat) ---
+                candles_in_trade = len(post_candles)
+                pct_from_entry = abs(live_c.close - entry_p) / entry_p * 100.0 if entry_p > 0 else 0.0
+                if candles_in_trade >= Config.STAGNATION_MAX_CANDLES and pct_from_entry < Config.STAGNATION_THRESHOLD_PCT and "TP1" not in hits:
+                    tot_usd = self._record_trade_event(tid, tr, "STAGNATION_EXIT", 0.0)
+                    demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "BREAKEVEN_STOP") if not self.dry_run else ""
+                    if not self.dry_run and self.notifier.is_configured:
+                        m_txt = (
+                            f"⏱ <b>OYALANMA ÇIKIŞI (STAGNATION EXIT) — #{sym}</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"📌 İşlem <b>{candles_in_trade} mumdur (2.5 saat)</b> kâra gidemeyip giriş seviyesinde sıkıştı.\n"
+                            f"🛡 Teminatı serbest bırakmak ve riski sıfırlamak için <b>Giriş Seviyesinde kapatıldı</b>.\n"
+                            f"💼 <b>Güncel Kasa:</b> <code>{cur_bank:.2f}$</code>"
+                        )
+                        if demo_note:
+                            m_txt += f"\n\n{demo_note}"
+                        self.notifier.send_message(m_txt)
+                        print(f"[TELEGRAM GÖNDERİLDİ] Oyalanma Çıkışı -> {sym}")
+                    del tracked_trades[tid]
+                    continue
 
                 # --- STOP KONTROLÜ ---
                 hit_sl = (direction == "LONG" and live_c.low <= active_sl) or (
@@ -405,6 +437,34 @@ class ScannerEngine:
                         self.notifier.send_message(m_txt)
                         print(f"[TELEGRAM GÖNDERİLDİ] TP1 Vuruldu -> {sym} ({direction}) (+{gain_tp1_usd:.2f}$)")
 
+                # --- DİNAMİK KÂR KİLİDİ (TP1'e %85 yaklaşıp dönüş fitili verirse erkenden kapat) ---
+                tp1_dist = abs(tp1_p - entry_p)
+                if direction == "LONG":
+                    progress = (bar_high - entry_p) / tp1_dist if tp1_dist > 0 else 0.0
+                    is_pulling_back = live_c.close < bar_high - (0.35 * (bar_high - entry_p))
+                else:
+                    progress = (entry_p - bar_low) / tp1_dist if tp1_dist > 0 else 0.0
+                    is_pulling_back = live_c.close > bar_low + (0.35 * (entry_p - bar_low))
+
+                if "TP1" not in hits and progress >= Config.NEAR_TP_TRIGGER_PCT and is_pulling_back:
+                    hits.append("TP1")
+                    tr["current_sl"] = entry_p
+                    gain_tp1_usd = Config.TP1_CLOSE_PCT * pos_usd * (abs(live_c.close - entry_p) / entry_p)
+                    tot_usd = self._record_trade_event(tid, tr, "TP1", gain_tp1_usd)
+                    demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP1") if not self.dry_run else ""
+                    if not self.dry_run and self.notifier.is_configured:
+                        m_txt = (
+                            f"⚡ <b>DİNAMİK KÂR KİLİDİ (TP1'DEN DÖNÜŞ) — #{sym}</b>\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"🎯 Fiyat TP1 hedefine <b>%{progress*100:.0f}</b> oranında ulaştı ve dönüş fitili verdi!\n"
+                            f"💵 Kârı kaçırmamak için <b>pozisyonun %75'i erkenden kapatıldı (+{gain_tp1_usd:.2f}$)</b>.\n"
+                            f"🛡 Kalan %25 için Stop-Loss <b>Giriş Fiyatına (Başabaş)</b> çekildi!"
+                        )
+                        if demo_note:
+                            m_txt += f"\n\n{demo_note}"
+                        self.notifier.send_message(m_txt)
+                        print(f"[TELEGRAM GÖNDERİLDİ] Dinamik TP1 Kâr Kilidi -> {sym}")
+
             # 2) Yeni Hacimli Kırılımları Tara
             cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
             for symbol, (ticker, candles) in klines_map.items():
@@ -413,6 +473,7 @@ class ScannerEngine:
                     candles=candles,
                     ticker=ticker,
                     bankroll_usd=cur_bank,
+                    btc_regime=btc_regime,
                 )
                 if setup is None:
                     continue

@@ -19,8 +19,14 @@ services:
       - key: BYBIT_DEMO_API_SECRET
         sync: false
       - key: TOP_SYMBOLS_COUNT
-        value: "65"
+        value: "40"
+      - key: MIN_24H_TURNOVER_USD
+        value: "25000000"
       - key: TIMEFRAME
         value: "15"
       - key: SCAN_INTERVAL_SECONDS
         value: "30"
+      - key: DEFAULT_LEVERAGE
+        value: "30"
+      - key: MARGIN_PER_TRADE_PCT
+        value: "10.0"

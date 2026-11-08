@@ -891,16 +891,26 @@ class ScannerEngine:
 
     def set_bankroll_text(self, new_bankroll: float) -> str:
         val = max(10.0, round(float(new_bankroll), 2))
-        self.state["current_bankroll"] = val
-        self.state["day_start_bankroll"] = val
+        closed_pos = 0
+        cancelled_ords = 0
+        real_wb = val
+        if not self.dry_run and self.demo_trader.is_configured:
+            closed_pos, cancelled_ords, real_wb = self.demo_trader.reset_demo_account(val)
+        self.state["current_bankroll"] = real_wb
+        self.state["wallet_balance"] = real_wb
+        self.state["unrealised_pnl"] = 0.0
+        self.state["day_start_bankroll"] = real_wb
+        self.state["tracked_trades"] = {}
+        self.state["daily_events"] = []
         self._save_state()
         return (
-            f"💼 <b>Kasa Bütçesi Güncellendi!</b>\n"
+            f"🔄 <b>SİSTEM VE BYBIT DEMO KASA SIFIRDAN BAŞLATILDI!</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"• <b>Yeni Kasa Bütçesi:</b> <b><code>{val:.2f}$</code></b>\n"
-            f"• <b>A+ Kalite İşlem Girişi (%8):</b> <code>{val * 0.08:.2f}$</code> Marjin (25x ile {val * 2.0:.0f}$ Büyüklük)\n"
-            f"• <b>A Kalite İşlem Girişi (%6):</b> <code>{val * 0.06:.2f}$</code> Marjin (25x ile {val * 1.5:.0f}$ Büyüklük)\n"
-            f"• <b>B Kalite İşlem Girişi (%4):</b> <code>{val * 0.04:.2f}$</code> Marjin (25x ile {val * 1.0:.0f}$ Büyüklük)"
+            f"• 🧹 <b>Kapatılan Açık Pozisyon:</b> <code>{closed_pos} adet</code>\n"
+            f"• 🗑 <b>İptal Edilen Bekleyen Emir:</b> <code>{cancelled_ords} adet</code>\n"
+            f"• 🏦 <b>Yeni Gerçek Bybit Demo Bakiyesi:</b> <b><code>{real_wb:.2f}$</code></b>\n"
+            f"• 🛡 <b>Sabit Risk Koruması:</b> Stop olursa maks. <code>-{real_wb * 0.02:.2f}$</code> (%2) risk\n"
+            f"• 🎯 <b>TP1 (%80 Kâr Kilidi):</b> TP1 vurulduğunda pozisyonun %80'i cebe kilitlenir!"
         )
 
     def toggle_demo_auto_text(self, enable: bool) -> str:

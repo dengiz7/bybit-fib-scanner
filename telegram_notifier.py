@@ -624,7 +624,7 @@ class TelegramNotifier:
             elif cmd in ("/demo", "/cuzdan"):
                 if get_demo_cb is not None:
                     self.send_message(get_demo_cb(), sender_chat_id)
-            elif cmd == "/kasa":
+            elif cmd in ("/kasa", "/sifirla", "/reset"):
                 if set_bankroll_cb is not None:
                     val = 100.0
                     if len(parts) > 1:

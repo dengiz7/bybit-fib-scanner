@@ -330,6 +330,73 @@ class BybitDemoTrader:
             )
         return count
 
+    def close_all_open_positions(self) -> int:
+        """Bybit Demo hesabındaki tüm açık pozisyonları Market emriyle anında kapatır."""
+        if not self.is_configured:
+            return 0
+        positions = self.get_open_positions()
+        closed_cnt = 0
+        for p in positions:
+            sym = str(p.get("symbol") or "")
+            side = str(p.get("side") or "Buy")
+            sz = str(p.get("size") or "0")
+            if not sym or float(sz) <= 0:
+                continue
+            close_side = "Sell" if side == "Buy" else "Buy"
+            res = self._request(
+                "POST",
+                "/v5/order/create",
+                {
+                    "category": "linear",
+                    "symbol": sym,
+                    "side": close_side,
+                    "orderType": "Market",
+                    "qty": sz,
+                    "reduceOnly": True,
+                    "positionIdx": 0,
+                },
+                signed=True,
+            )
+            if res.get("retCode") == 0:
+                closed_cnt += 1
+        return closed_cnt
+
+    def reset_demo_account(self, target_usd: float = 100.0) -> Tuple[int, int, float]:
+        """
+        1) Tüm açık Demo pozisyonları kapatır,
+        2) Tüm bekleyen emirleri iptal eder,
+        3) Bybit V5 '/v5/account/demo-apply-money' ile gerçek Demo USDT bakiyesini hedef tutara (ör. 100$) eşitler!
+        Dönüş: (kapatılan_pozisyon_sayısı, iptal_edilen_emir_sayısı, yeni_gerçek_bakiye)
+        """
+        if not self.is_configured:
+            return 0, 0, target_usd
+        closed_pos = self.close_all_open_positions()
+        cancelled_ords = self.cancel_all_open_orders()
+        time.sleep(0.8)
+        summary = self.get_demo_account_summary()
+        cur_wb = summary["wallet_balance"] if summary else target_usd
+        diff = int(round(target_usd - cur_wb))
+        if abs(diff) >= 1:
+            adj_type = 0 if diff > 0 else 1
+            self._request(
+                "POST",
+                "/v5/account/demo-apply-money",
+                {
+                    "adjustType": adj_type,
+                    "utaDemoApplyMoney": [
+                        {
+                            "coin": "USDT",
+                            "amountStr": str(abs(diff)),
+                        }
+                    ],
+                },
+                signed=True,
+            )
+            time.sleep(0.6)
+            summary = self.get_demo_account_summary()
+            cur_wb = summary["wallet_balance"] if summary else target_usd
+        return closed_pos, cancelled_ords, round(cur_wb, 2)
+
     def place_setup_order(
         self,
         setup: FibSetup,

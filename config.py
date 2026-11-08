@@ -67,7 +67,8 @@ class Config:
 
     # --- Piyasa Yapısı (Market Structure) & BoS Ayarları ---
     # Video 1 [03:14]: Fitiller (wicks) piyasa yapısına dahildir.
-    PIVOT_LEFT_BARS: int = int(os.getenv("PIVOT_LEFT_BARS", "3"))
+    # 4 Sol / 2 Sağ mum ana yapı filtresi: Gece saatlerindeki 3 mumluk mikro-gürültü tuzaklarını eler!
+    PIVOT_LEFT_BARS: int = int(os.getenv("PIVOT_LEFT_BARS", "4"))
     PIVOT_RIGHT_BARS: int = int(os.getenv("PIVOT_RIGHT_BARS", "2"))
     MAX_BOS_AGE_CANDLES: int = int(os.getenv("MAX_BOS_AGE_CANDLES", "14"))  # Son 14 mum (3.5 saat) içindeki taze BoS'lar
 
@@ -76,9 +77,11 @@ class Config:
     MIN_TP1_PCT: float = float(os.getenv("MIN_TP1_PCT", "0.85"))
     MIN_TP1_PCT_MAJORS: float = float(os.getenv("MIN_TP1_PCT_MAJORS", "0.55"))  # BTC, ETH, SOL, XRP, BNB için alt sınır
 
-    # --- Kasa Yönetimi ve Pozisyon Büyüklüğü (100$ Baz Kasa & 25x İzole Kaldıraç) ---
+    # --- Kasa Yönetimi ve Sabit Risk Bazlı Pozisyon Büyüklüğü (100$ Baz Kasa & 25x İzole Kaldıraç) ---
     DEFAULT_BANKROLL_USD: float = float(os.getenv("DEFAULT_BANKROLL_USD", "100.0"))
     DEFAULT_LEVERAGE: int = int(os.getenv("DEFAULT_LEVERAGE", "25"))
+    MAX_RISK_PCT_PER_TRADE: float = float(os.getenv("MAX_RISK_PCT_PER_TRADE", "2.0"))  # Stop olursa maks. kasanın %2'si (~2$) risk edilir
+    TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "0.80"))  # TP1'de pozisyonun %80'ini kapatıp kârı cebe kilitle!
 
     # --- Bybit V5 Demo Trading Otomatik Al-Sat Ayarları (%100 Ücretsiz Sanal Bakiye) ---
     BYBIT_DEMO_API_KEY: str = os.getenv("BYBIT_DEMO_API_KEY", "").strip()
@@ -96,13 +99,13 @@ class Config:
     FIB_LEVEL_NEG_10: float = -1.000 # 2. Uzatma (Extension) - Trailing SL hedefi
 
     # --- Stop-Loss Buffer ("just above/below the 1 level" - Video 1 [04:38, 05:45]) ---
-    # 0.618 giriş, 0.0 TP ve 1.03 SL ile tam 0.618 / (1.03 - 0.618) = 1.50 RRR verir!
-    SL_BUFFER_RATIO: float = float(os.getenv("SL_BUFFER_RATIO", "0.03"))
+    # 1.05 SL buffer ile 02:45 tipi likidite avı fitillerine (stop-hunt) yakalanmayı önler!
+    SL_BUFFER_RATIO: float = float(os.getenv("SL_BUFFER_RATIO", "0.05"))
 
     # --- Geri Çekilme & Aşama Eşikleri (Video 1 [03:35]) ---
     # "watch this move play out until the price starts retracing heavily"
     MIN_RETRACEMENT_STAGE1: float = float(os.getenv("MIN_RETRACEMENT_STAGE1", "0.20"))  # Aşama 1 bildirimi için min %20 geri çekilme
-    GOLDEN_ZONE_MIN: float = 0.500   # Aşama 2 Altın Bölge başlangıcı
+    GOLDEN_ZONE_MIN: float = 0.580   # Aşama 2 Gerçek Altın Cep (0.580 - 0.618) başlangıcı (0.50 erken giriş RRR kaybını önler)
     GOLDEN_ZONE_MAX: float = 0.786   # 0.618 etrafındaki aktif giriş bandı üst sınırı (1.0 SL'ye kadar geçerli)
 
     # --- Fibonacci'nin Başarısız Olduğu 3 Senaryo İçin Zorunlu Filtreler (Video 1 [01:43-02:46]) ---

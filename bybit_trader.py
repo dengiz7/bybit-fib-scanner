@@ -338,24 +338,33 @@ class BybitDemoTrader:
     ) -> Tuple[bool, str]:
         """
         Teminatı uzaktaki Aşama 1 limit emirleriyle kilitlememek için, Bybit Demo üzerinde
-        sadece fiyat Aşama 2 (0.500 - 0.618 Altın Bölge) içine girdiğinde 25x kaldıraç ve
-        düşük marjinle (%8 / %6 / %4) doğrudan işlem açar!
+        sadece fiyat Aşama 2 (0.580 - 0.618 Gerçek Altın Cep) içine girdiğinde 25x kaldıraç ve
+        Sabit Risk Koruması (Stop olursa maks. kasanın %2'si = ~2$ zarar) ile doğrudan işlem açar!
         """
         if not self.is_configured or not self.enabled:
             return False, ""
 
         lev = Config.DEFAULT_LEVERAGE
         alloc_pct = setup.recommended_bankroll_pct
-        margin_usd = max(4.0, virtual_bankroll_usd * (alloc_pct / 100.0))
-        notional_usd = margin_usd * lev
+        base_margin_usd = max(4.0, virtual_bankroll_usd * (alloc_pct / 100.0))
+        base_notional_usd = base_margin_usd * lev
+
+        # Sabit Risk (Risk-Cap) Hesabı: Stop-Loss mesafesi genişse pozisyon büyüklüğünü otomatik kıs,
+        # böylece tek bir stop asla kasanın %2'sinden (~2.00$) fazla kaybettirmesin!
+        entry_ref = setup.current_price if setup.current_price > 0 else setup.fib.level_0618
+        sl_dist_ratio = abs(entry_ref - setup.fib.stop_loss) / entry_ref if entry_ref > 0 else 0.015
+        max_risk_usd = max(1.50, virtual_bankroll_usd * (Config.MAX_RISK_PCT_PER_TRADE / 100.0))
+        risk_capped_notional = (max_risk_usd / sl_dist_ratio) if sl_dist_ratio > 0.002 else base_notional_usd
+        notional_usd = min(base_notional_usd, risk_capped_notional)
+        margin_usd = max(2.0, notional_usd / lev)
 
         # Aşama 1'de (fiyat henüz %20 geri çekilmişken) tahtaya emir dizip 100$ teminatı kilitleme!
         if alert_type == "STAGE_1":
             return (
                 False,
-                f"🛡 <b>Bybit Demo Kasa Koruması:</b> 100$ kasanın teminatını uzaktaki emirlerle kilitlememek için "
-                f"fiyat <code>0.500 – 0.618</code> Altın Bölgesine (Aşama 2) girdiği an "
-                f"<b><code>{margin_usd:.2f}$</code> Marjin ({lev}x ➡️ {notional_usd:.0f}$ Büyüklük)</b> ile otomatik açılacak!",
+                f"🛡 <b>Bybit Demo Kasa & RRR Koruması:</b> Erken (0.50) giriş yapıp Risk/Ödül oranını bozmamak için "
+                f"fiyat <code>0.580 – 0.618</code> <b>Altın Cep (Golden Pocket)</b> bölgesine girdiği an "
+                f"<b><code>{margin_usd:.2f}$</code> Marjin ({lev}x ➡️ {notional_usd:.0f}$ Büyüklük | Maks. Stop Riski: -{max_risk_usd:.2f}$)</b> ile otomatik açılacak!",
             )
 
         symbol = setup.symbol
@@ -376,9 +385,9 @@ class BybitDemoTrader:
         # 3) Kaldıracı 25x (veya parite üst limiti) ayarla ve lot kurallarını çek
         eff_lev = self.ensure_leverage(symbol, lev)
         spec = self.get_instrument_spec(symbol)
-        notional_usd = margin_usd * eff_lev
+        notional_usd = min(base_margin_usd * eff_lev, risk_capped_notional)
+        margin_usd = max(2.0, notional_usd / eff_lev)
 
-        entry_ref = setup.current_price
         if entry_ref <= 0:
             return False, ""
 
@@ -389,13 +398,12 @@ class BybitDemoTrader:
             qty_str = spec["minOrderQty"]
 
         side = "Buy" if setup.direction == "LONG" else "Sell"
-        close_side = "Sell" if setup.direction == "LONG" else "Buy"
         sl_str = self.round_step(setup.fib.stop_loss, spec["tickSize"], round_down=(setup.direction == "LONG"))
         tp1_str = self.round_step(setup.fib.level_0, spec["tickSize"], round_down=(setup.direction == "SHORT"))
         tp2_str = self.round_step(setup.fib.level_neg_05, spec["tickSize"], round_down=(setup.direction == "SHORT"))
         tp3_str = self.round_step(setup.fib.level_neg_10, spec["tickSize"], round_down=(setup.direction == "SHORT"))
 
-        # STAGE_2 (Fiyat 0.500 - 0.618 Altın Bölgeye Girdi!) -> Anında aktif pozisyon aç + Otomatik TP ve SL koy
+        # STAGE_2 (Fiyat 0.580 - 0.618 Altın Cebe Girdi!) -> Anında aktif pozisyon aç + Otomatik TP ve SL koy
         self.cancel_all_symbol_orders(symbol)
         order_params = {
             "category": "linear",
@@ -411,13 +419,14 @@ class BybitDemoTrader:
         }
         res = self._request("POST", "/v5/order/create", order_params, signed=True)
         if res.get("retCode") == 0:
+            est_sl_usd = notional_usd * sl_dist_ratio
             return (
                 True,
                 f"🤖 <b>BYBIT DEMO OTOMATİK POZİSYON + TP/SL AÇILDI!</b>\n"
-                f"  • <b>Tür:</b> <code>Altın Bölge Girişi ({side})</code> | <b>Miktar:</b> <code>{qty_str}</code>\n"
-                f"  • <b>Kademeli TP1 / TP2 / TP3:</b> <code>{tp1_str}</code> / <code>{tp2_str}</code> / <code>{tp3_str}</code>\n"
-                f"  • <b>Otomatik Stop-Loss:</b> <code>{sl_str}</code>\n"
-                f"  • <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> (Kasanın %{alloc_pct}'i | {eff_lev}x ➡️ <code>{notional_usd:.0f}$</code> Büyüklük)",
+                f"  • <b>Tür:</b> <code>0.618 Altın Cep Girişi ({side})</code> | <b>Miktar:</b> <code>{qty_str}</code>\n"
+                f"  • <b>Kademeli TP1 (%80) / TP2 / TP3:</b> <code>{tp1_str}</code> / <code>{tp2_str}</code> / <code>{tp3_str}</code>\n"
+                f"  • <b>Otomatik Stop-Loss (1.05):</b> <code>{sl_str}</code> <i>(Maks. Risk: -{est_sl_usd:.2f}$)</i>\n"
+                f"  • <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> ({eff_lev}x ➡️ <code>{notional_usd:.0f}$</code> Büyüklük)",
             )
         return False, f"⚠️ <b>Bybit Demo Giriş Hatası:</b> <code>{res.get('retMsg')}</code>"
 
@@ -450,8 +459,11 @@ class BybitDemoTrader:
             return ""
 
         if event_type == "TP1":
-            # 1) Pozisyonun %50'sini Market Reduce-Only ile kapat
-            close_qty = self.round_step(cur_size * 0.50, spec["qtyStep"], round_down=True)
+            # 1) Pozisyonun %80'ini (Config.TP1_CLOSE_PCT) Market Reduce-Only ile kapatıp ana kârı cebe kilitle!
+            tp1_pct_close = Config.TP1_CLOSE_PCT
+            close_qty = self.round_step(cur_size * tp1_pct_close, spec["qtyStep"], round_down=True)
+            if float(close_qty) < float(spec["minOrderQty"]):
+                close_qty = self.round_step(cur_size, spec["qtyStep"], round_down=True)
             if float(close_qty) >= float(spec["minOrderQty"]):
                 self._request(
                     "POST",
@@ -467,7 +479,7 @@ class BybitDemoTrader:
                     },
                     signed=True,
                 )
-            # 2) Kalan %50 pozisyonun Stop-Loss'unu Giriş Fiyatına (Başabaş) çek!
+            # 2) Kalan %20 pozisyonun Stop-Loss'unu Giriş Fiyatına (Başabaş) çek!
             be_price = self.round_step(avg_entry, spec["tickSize"], round_down=(direction == "LONG"))
             self._request(
                 "POST",
@@ -482,12 +494,12 @@ class BybitDemoTrader:
                 signed=True,
             )
             return (
-                f"🤖 <b>Bybit Demo Otomatik İşlem:</b> #{symbol} pozisyonunun <b>%50'si ({close_qty}) kârla kapatıldı</b> "
-                f"ve kalan kısmın Stop-Loss'u <b>Giriş Fiyatına (<code>{be_price}</code> Başabaş)</b> çekildi!"
+                f"🤖 <b>Bybit Demo Otomatik İşlem:</b> #{symbol} pozisyonunun <b>%{int(tp1_pct_close*100)}'i ({close_qty}) kârla kapatılıp cebe kilitlendi</b> "
+                f"ve kalan %{int((1.0-tp1_pct_close)*100)} kısmın Stop-Loss'u <b>Giriş Fiyatına (<code>{be_price}</code> Başabaş)</b> çekildi!"
             )
 
         elif event_type == "TP2":
-            # Kalan pozisyonun yarısını (toplamın %25'ini) kapat ve SL'yi TP1'e taşı
+            # Kalan %20 pozisyonun yarısını (toplamın %10'unu) kapat ve SL'yi TP1'e taşı
             close_qty = self.round_step(cur_size * 0.50, spec["qtyStep"], round_down=True)
             if float(close_qty) >= float(spec["minOrderQty"]):
                 self._request(
@@ -518,7 +530,7 @@ class BybitDemoTrader:
                 signed=True,
             )
             return (
-                f"🤖 <b>Bybit Demo Otomatik İşlem:</b> #{symbol} pozisyonunun <b>%25'i ({close_qty}) daha kapatıldı</b> "
+                f"🤖 <b>Bybit Demo Otomatik İşlem:</b> #{symbol} kalan pozisyonun yarısı (<code>{close_qty}</code>) daha kapatıldı "
                 f"ve İz Süren Stop <b>TP1 (<code>{tp1_sl}</code>)</b> seviyesine taşındı!"
             )
 

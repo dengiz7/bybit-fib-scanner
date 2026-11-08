@@ -405,7 +405,7 @@ class ScannerEngine:
                             deepest_ret = ret
                         if ret >= 0.618:
                             touched_618 = True
-                        if ret >= 0.500 and not entered_zone:
+                        if ret >= Config.GOLDEN_ZONE_MIN and not entered_zone:
                             entered_zone = True
                             zone_ts = c.timestamp
 
@@ -501,16 +501,21 @@ class ScannerEngine:
                     live_c = sym_candles[-1]
                     hits: List[str] = tr.setdefault("hits", [])
                     active_sl = float(tr["current_sl"])
-                    margin_usd = float(tr.get("margin_usd", 15.0))
-                    pos_usd = margin_usd * Config.DEFAULT_LEVERAGE
+                    margin_usd = float(tr.get("margin_usd", 8.0))
+                    base_pos_usd = margin_usd * Config.DEFAULT_LEVERAGE
+                    sl_pct_init = max(0.2, calc_pct_diff(level_0618, float(tr["initial_sl"])))
+                    cur_bank_ref = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
+                    max_risk_usd = max(1.50, cur_bank_ref * (Config.MAX_RISK_PCT_PER_TRADE / 100.0))
+                    pos_usd = min(base_pos_usd, max_risk_usd / (sl_pct_init / 100.0))
+                    tp1_close_ratio = Config.TP1_CLOSE_PCT
+                    rem_half_ratio = max(0.05, (1.0 - tp1_close_ratio) / 2.0)
 
                     # Stop kontrolü (TP1 öncesi Tam Stop, TP1 sonrası Başabaş, TP2 sonrası TP1 İz Süren Stop)
                     if (direction == "LONG" and live_c.low <= active_sl) or (
                         direction == "SHORT" and live_c.high >= active_sl
                     ):
                         if "TP1" not in hits:
-                            sl_pct = calc_pct_diff(level_0618, float(tr["initial_sl"]))
-                            loss_usd = -1.0 * pos_usd * (sl_pct / 100.0)
+                            loss_usd = -1.0 * pos_usd * (sl_pct_init / 100.0)
                             tot_usd = self._record_trade_event(tid, tr, "STOP_LOSS", loss_usd)
                             flip_watch[sym] = {"stopped_dir": direction, "ts": int(time.time() * 1000)}
                             demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "STOP_LOSS") if not self.dry_run else ""
@@ -543,7 +548,7 @@ class ScannerEngine:
                                 self.notifier.send_message(m_txt)
                         else:
                             tp1_pct = calc_pct_diff(level_0618, tp1_val)
-                            rem_gain_usd = 0.25 * pos_usd * (tp1_pct / 100.0)
+                            rem_gain_usd = rem_half_ratio * pos_usd * (tp1_pct / 100.0)
                             tot_usd = self._record_trade_event(tid, tr, "TRAILING_TP1_STOP", rem_gain_usd)
                             demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TRAILING_TP1_STOP") if not self.dry_run else ""
                             if not self.dry_run and self.notifier.is_configured:
@@ -561,7 +566,7 @@ class ScannerEngine:
                         del tracked_trades[tid]
                         continue
 
-                    # TP1 (0.0 seviyesi -> Pozisyonun %50'si kapanır, SL girişe çekilir)
+                    # TP1 (0.0 seviyesi -> Pozisyonun %80'i kapanıp kâr kilitlenir, SL girişe çekilir)
                     if "TP1" not in hits and (
                         (direction == "LONG" and bar_high >= tp1_val)
                         or (direction == "SHORT" and bar_low <= tp1_val)
@@ -569,7 +574,7 @@ class ScannerEngine:
                         hits.append("TP1")
                         tr["current_sl"] = level_0618
                         tp1_pct = calc_pct_diff(level_0618, tp1_val)
-                        gain_tp1_usd = 0.50 * pos_usd * (tp1_pct / 100.0)
+                        gain_tp1_usd = tp1_close_ratio * pos_usd * (tp1_pct / 100.0)
                         tot_usd = self._record_trade_event(tid, tr, "TP1", gain_tp1_usd)
                         demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP1") if not self.dry_run else ""
                         if not self.dry_run and self.notifier.is_configured:
@@ -586,7 +591,7 @@ class ScannerEngine:
                             self.notifier.send_message(m_txt)
                             print(f"[TELEGRAM GÖNDERİLDİ] TP1 Vuruldu -> {sym} ({direction}) (+{gain_tp1_usd:.2f}$)")
 
-                    # TP2 (-0.5 uzatma -> Pozisyonun %25'i daha kapanır, SL TP1'e çekilir)
+                    # TP2 (-0.5 uzatma -> Kalanın yarısı [%10] daha kapanır, SL TP1'e çekilir)
                     if "TP1" in hits and "TP2" not in hits and (
                         (direction == "LONG" and bar_high >= tp2_val)
                         or (direction == "SHORT" and bar_low <= tp2_val)
@@ -594,7 +599,7 @@ class ScannerEngine:
                         hits.append("TP2")
                         tr["current_sl"] = tp1_val
                         tp2_pct = calc_pct_diff(level_0618, tp2_val)
-                        gain_tp2_usd = 0.25 * pos_usd * (tp2_pct / 100.0)
+                        gain_tp2_usd = rem_half_ratio * pos_usd * (tp2_pct / 100.0)
                         tot_usd = self._record_trade_event(tid, tr, "TP2", gain_tp2_usd)
                         demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP2") if not self.dry_run else ""
                         if not self.dry_run and self.notifier.is_configured:
@@ -611,14 +616,14 @@ class ScannerEngine:
                             self.notifier.send_message(m_txt)
                             print(f"[TELEGRAM GÖNDERİLDİ] TP2 Vuruldu -> {sym} ({direction}) (+{gain_tp2_usd:.2f}$)")
 
-                    # TP3 (-1.0 tam uzatma -> Son %25 pozisyon kapanır)
+                    # TP3 (-1.0 tam uzatma -> Son %10 pozisyon kapanır)
                     if "TP2" in hits and "TP3" not in hits and (
                         (direction == "LONG" and bar_high >= tp3_val)
                         or (direction == "SHORT" and bar_low <= tp3_val)
                     ):
                         hits.append("TP3")
                         tp3_pct = calc_pct_diff(level_0618, tp3_val)
-                        gain_tp3_usd = 0.25 * pos_usd * (tp3_pct / 100.0)
+                        gain_tp3_usd = rem_half_ratio * pos_usd * (tp3_pct / 100.0)
                         tot_usd = self._record_trade_event(tid, tr, "TP3", gain_tp3_usd)
                         demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP3") if not self.dry_run else ""
                         if not self.dry_run and self.notifier.is_configured:

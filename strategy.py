@@ -666,6 +666,10 @@ def _evaluate_candidate(
             return None
         conf_start = golden_zone_idx if golden_zone_idx >= 0 else peak_idx + 1
         confirmation = check_candle_confirmation(closed_candles, conf_start, fib, direction)
+        # Bıçak Tutma (Falling Knife) Koruması: Fiyat 0.786'nın ötesinde kapanmışsa ve henüz Pin Bar/Engulfing
+        # ret onayı yoksa körlemesine Market emir açma!
+        if current_retrace > Config.GOLDEN_ZONE_MAX and confirmation is None:
+            return None
         stage = "STAGE_2_GOLDEN_ZONE"
     elif current_retrace >= Config.MIN_RETRACEMENT_STAGE1:
         confirmation = None
@@ -677,6 +681,16 @@ def _evaluate_candidate(
         (direction == "LONG" and flipped_from_direction == "SHORT")
         or (direction == "SHORT" and flipped_from_direction == "LONG")
     )
+
+    # Ana Trend (EMA 50 & EMA 200) Koruması: Ters trend (Counter-Trend) gürültü işlemlerini ele!
+    ema50 = compute_ema(closed_candles, 50)
+    ema200 = compute_ema(closed_candles, 200)
+    last_closed_price = closed_candles[-1].close
+    if not is_flip:
+        if direction == "LONG" and not (last_closed_price >= ema50 and ema50 >= ema200 * 0.998):
+            return None
+        if direction == "SHORT" and not (last_closed_price <= ema50 and ema50 <= ema200 * 1.002):
+            return None
 
     strength_score, quality_grade, bankroll_pct, conf_notes = evaluate_confluence_score(
         closed_candles=closed_candles,
@@ -690,6 +704,10 @@ def _evaluate_candidate(
         candle_confirmation=confirmation,
         is_trend_flip=is_flip,
     )
+
+    # Kurumsal SMC / ICT Kesişim Şartı: FVG, Order Block veya Mum Onayı olmayan zayıf B sınıfı (< 65 puan) sinyalleri ele!
+    if strength_score < 65:
+        return None
 
     return FibSetup(
         setup_id=f"{symbol}_{direction}_{origin_sw.timestamp}",

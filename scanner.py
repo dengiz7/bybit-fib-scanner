@@ -304,8 +304,9 @@ class ScannerEngine:
                 active_sl = float(tr.get("current_sl") or tr.get("initial_sl", 0.0))
                 entry_p = float(tr.get("entry_price") or tr.get("entry_0618", 0.0))
 
-                margin_usd = float(tr.get("margin_usd", 20.0))
-                pos_usd = margin_usd * Config.DEFAULT_LEVERAGE
+                margin_usd = float(tr.get("margin_usd", 10.0))
+                trade_lev = float(tr.get("leverage") or 15)
+                pos_usd = margin_usd * trade_lev
                 hits: List[str] = tr.setdefault("hits", [])
                 cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
 
@@ -455,6 +456,7 @@ class ScannerEngine:
                                 "strength_score": setup.strength_score,
                                 "quality_grade": setup.quality_grade,
                                 "margin_usd": setup.recommended_margin_usd,
+                                "leverage": Config.DEFAULT_LEVERAGE,
                                 "entry_ts": candles[-2].timestamp if len(candles) >= 2 else int(time.time() * 1000),
                                 "hits": [],
                                 "realized_usd": 0.0,
@@ -593,7 +595,7 @@ class ScannerEngine:
             f"• 🧹 <b>Kapatılan Açık Pozisyon:</b> <code>{closed_pos} adet</code>\n"
             f"• 🗑 <b>İptal Edilen Bekleyen Emir:</b> <code>{cancelled_ords} adet</code>\n"
             f"• 🏦 <b>Yeni Gerçek Bybit Demo Bakiyesi:</b> <b><code>{real_wb:.2f}$</code></b>\n"
-            f"• ⚡ <b>Kaldıraç & Marjin:</b> 15x İzole (İşlem başı %20 = ~20$ marjin)\n"
+            f"• ⚡ <b>Kaldıraç & Marjin:</b> 30x İzole (İşlem başı %10 = ~10$ marjin)\n"
             f"• 🎯 <b>TP1 (%75 Kâr Kilidi):</b> TP1 vurulduğunda %75 kâr cebe kilitlenir, SL Girişe çekilir!"
         )
 
@@ -679,8 +681,8 @@ def main() -> None:
             "✨ <b>Yeni Strateji Özellikleri:</b>\n"
             "  • ⚡ <b>Zaman Dilimi:</b> <code>15 Dakika (Donchian 20-Mum Kırılımı)</code>\n"
             "  • 💥 <b>Filtre:</b> En az <code>1.8x RVOL</code> kurumsal hacim patlaması + Güçlü mum gövdesi\n"
-            "  • 💼 <b>İşlem Başı Marjin:</b> Kasanın <code>%20'si</code> (100$ kasa için <code>20$</code> marjin)\n"
-            "  • ⚡ <b>Kaldıraç:</b> <code>15x İzole</code> (Komisyonu ezen saf kâr odaklı)\n"
+            "  • 💼 <b>İşlem Başı Marjin:</b> Kasanın <code>%10'u</code> (100$ kasa için <code>10$</code> marjin)\n"
+            "  • ⚡ <b>Kaldıraç:</b> <code>30x İzole</code> (Daha fazla eşzamanlı işlem kapasitesi)\n"
             "  • 🎯 <b>TP1 (1.6x ATR):</b> %75 pozisyon kârla kapanır, Stop Giriş Seviyesine (Başabaş) çekilir!\n"
             "  • 🚀 <b>TP2 (2.8x ATR):</b> Kalan %25 pozisyon tam trend kazancıyla kapatılır!\n"
             "  • 🛡 <b>Açık İşlem Sınırı:</b> Fırsat geldikçe bakiye yettiğince eşzamanlı işlem açabilir.\n"

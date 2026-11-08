@@ -188,7 +188,7 @@ def analyze_breakout(
     score = min(99, score)
     grade = "A+" if score >= 85 else "A"
 
-    # Marjin Hesabı (Kasanın %20'si)
+    # Marjin Hesabı (Kasanın %10'u)
     margin_usd = max(4.0, round(bankroll_usd * (Config.MARGIN_PER_TRADE_PCT / 100.0), 2))
 
     return BreakoutSetup(

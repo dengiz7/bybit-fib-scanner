@@ -72,10 +72,10 @@ class Config:
     SL_ATR_MULT: float = float(os.getenv("SL_ATR_MULT", "1.15"))   # SL: Kırılan seviyenin 1.15x ATR arkası
     TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "0.75"))  # TP1'de pozisyonun %75'ini kapat, SL'yi girişe çek!
 
-    # --- Kasa Yönetimi ve Pozisyon Büyüklüğü (100$ Kasa & 15x İzole Kaldıraç) ---
+    # --- Kasa Yönetimi ve Pozisyon Büyüklüğü (100$ Kasa & 30x İzole Kaldıraç) ---
     DEFAULT_BANKROLL_USD: float = float(os.getenv("DEFAULT_BANKROLL_USD", "100.0"))
-    DEFAULT_LEVERAGE: int = int(os.getenv("DEFAULT_LEVERAGE", "15"))
-    MARGIN_PER_TRADE_PCT: float = float(os.getenv("MARGIN_PER_TRADE_PCT", "20.0"))  # Her işleme kasanın %20'si (20$ marjin -> 300$ pozisyon)
+    DEFAULT_LEVERAGE: int = int(os.getenv("DEFAULT_LEVERAGE", "30"))
+    MARGIN_PER_TRADE_PCT: float = float(os.getenv("MARGIN_PER_TRADE_PCT", "10.0"))  # Her işleme kasanın %10'u (10$ marjin -> 300$ pozisyon)
     MAX_CONCURRENT_DEMO_TRADES: int = int(os.getenv("MAX_CONCURRENT_DEMO_TRADES", "0"))  # 0 = Sınırsız (Bakiye el verdikçe fırsatlara girer)
 
     # --- Bybit V5 Demo Trading Otomatik Al-Sat Ayarları ---

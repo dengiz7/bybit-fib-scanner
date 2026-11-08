@@ -267,12 +267,12 @@ class BybitDemoTrader:
         return (res.get("result") or {}).get("list") or []
 
     def ensure_leverage(self, symbol: str, leverage: int = Config.DEFAULT_LEVERAGE) -> int:
-        """Paritede kaldıracı ayarlar (İzole modda)."""
+        """Paritede kaldıracı ayarlar (İzole modda, parite üst limitine göre)."""
         spec = self.get_instrument_spec(symbol)
         try:
-            max_lev = int(float(spec.get("maxLeverage", "15")))
+            max_lev = int(float(spec.get("maxLeverage", "30")))
         except Exception:
-            max_lev = 15
+            max_lev = 30
         eff_lev = min(leverage, max(5, max_lev))
         lev_str = str(eff_lev)
 
@@ -401,7 +401,7 @@ class BybitDemoTrader:
     ) -> Tuple[bool, str]:
         """
         Hacim Patlamalı Zirve Kırılımı gerçekleştiğinde Bybit Demo üzerinde
-        15x izole kaldıraçla anında Market emir açar ve TP2 / SL seviyelerini yerleştirir!
+        30x (veya parite limitinde) izole kaldıraçla anında Market emir açar ve TP2 / SL seviyelerini yerleştirir!
         """
         if not self.is_configured or not self.enabled:
             return False, ""

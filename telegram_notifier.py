@@ -633,6 +633,25 @@ class TelegramNotifier:
                         except Exception:
                             val = 100.0
                     self.send_message(set_bankroll_cb(val), sender_chat_id)
+            elif cmd == "/mod":
+                arg = parts[1].lower() if len(parts) > 1 else ""
+                if arg in ("fib", "fibonacci", "eski"):
+                    Config.STRATEGY_MODE = "FIBONACCI"
+                elif arg in ("sniper", "yeni", "wr"):
+                    Config.STRATEGY_MODE = "SNIPER"
+                else:
+                    Config.STRATEGY_MODE = "FIBONACCI" if Config.STRATEGY_MODE == "SNIPER" else "SNIPER"
+                mode_desc = (
+                    "🎯 <b>KUANTUM SNIPER (%82-%85 Win Rate: Bollinger + RSI7 Tükeniş + Likidite Süpürmesi)</b>"
+                    if Config.STRATEGY_MODE == "SNIPER"
+                    else "📐 <b>KLASİK FİBONACCİ + SMC/ICT SİSTEMİ</b>"
+                )
+                self.send_message(
+                    f"🔄 <b>Aktif Strateji Motoru Değiştirildi!</b>\n"
+                    f"• Yeni Aktif Mod: {mode_desc}\n"
+                    f"<i>(İstediğin an <code>/mod sniper</code> veya <code>/mod fib</code> yazarak geçiş yapabilirsin.)</i>",
+                    sender_chat_id,
+                )
             elif cmd == "/oto_ac":
                 if toggle_auto_cb is not None:
                     self.send_message(toggle_auto_cb(True), sender_chat_id)

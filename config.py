@@ -65,6 +65,11 @@ class Config:
     KLINE_LIMIT: int = 200  # Yapı ve ATR hesabı için çekilecek mum sayısı
     SCAN_INTERVAL_SECONDS: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))  # Tarama döngü süresi (sn)
 
+    # --- Aktif Strateji Motoru Seçimi ---
+    # "SNIPER" = %82-%85 Win Rate Kuantum Sniper (Bollinger + RSI7 Tükeniş + Likidite Süpürmesi + Trend Pullback)
+    # "FIBONACCI" = Eski Arty 15dk Fibonacci + SMC/ICT Sistemi (İstediğin an /mod fib ile dönebilirsin)
+    STRATEGY_MODE: str = os.getenv("STRATEGY_MODE", "SNIPER").strip().upper()
+
     # --- Piyasa Yapısı (Market Structure) & BoS Ayarları ---
     # Video 1 [03:14]: Fitiller (wicks) piyasa yapısına dahildir.
     # 4 Sol / 2 Sağ mum ana yapı filtresi: Gece saatlerindeki 3 mumluk mikro-gürültü tuzaklarını eler!

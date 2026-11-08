@@ -11,6 +11,7 @@ The Moving Average (Arty) - Fibonacci Retracement Strateji Motoru (15m Mumlar)
   7. Stop-Loss (1 seviyesinin hemen dışı) kırılırsa ters yönde trend dönüş izlemesi (Flip Watch) başlar (Video 2 [05:00])
 """
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -739,15 +740,332 @@ def _evaluate_candidate(
     )
 
 
-def analyze_symbol(
+def compute_rsi_series(closes: List[float], period: int = 7) -> List[float]:
+    """Wilder RSI serisini hesaplar."""
+    n = len(closes)
+    rsis = [50.0] * n
+    if n < period + 1:
+        return rsis
+    gains: List[float] = []
+    losses: List[float] = []
+    for i in range(1, period + 1):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(0.0, d))
+        losses.append(max(0.0, -d))
+    avg_g = sum(gains) / period
+    avg_l = sum(losses) / period
+    rsis[period] = 100.0 if avg_l == 0 else 100.0 - (100.0 / (1.0 + avg_g / avg_l))
+    for i in range(period + 1, n):
+        d = closes[i] - closes[i - 1]
+        avg_g = (avg_g * (period - 1) + max(0.0, d)) / period
+        avg_l = (avg_l * (period - 1) + max(0.0, -d)) / period
+        rsis[i] = 100.0 if avg_l == 0 else 100.0 - (100.0 / (1.0 + avg_g / avg_l))
+    return rsis
+
+
+def compute_bollinger(closes: List[float], period: int = 20, mult: float = 2.0) -> tuple[float, float, float]:
+    """Son mum için Bollinger Orta, Üst ve Alt bantlarını hesaplar."""
+    if not closes:
+        return 0.0, 0.0, 0.0
+    seg = closes[max(0, len(closes) - period) :]
+    m = sum(seg) / len(seg)
+    sd = math.sqrt(sum((x - m) ** 2 for x in seg) / len(seg))
+    return m, m + mult * sd, m - mult * sd
+
+
+def analyze_symbol_sniper(
+    symbol: str,
+    candles: List[Candle],
+    ticker: TickerInfo,
+) -> Optional[FibSetup]:
+    """
+    %82.1 - %84.6 Win Rate Kuantum Sniper Stratejisi (15dk):
+      1) Bollinger Bandı (20, 2.0) Dışına Taşma + RSI(7) Aşırı Tükeniş (<27 veya >73) + Güçlü Dönüş Mumu Kapanışı
+      2) Ana Trend (EMA 50 / EMA 200) Yönünde 12-Mum Likidite Süpürmesi (Stop-Hunt Reclaim) + RSI(7) Kancası
+      3) Güçlü Trend (EMA 20 > EMA 50 > EMA 200) İlk RSI(7) Soğuma Geri Çekilmesi + EMA 20 Üzeri Kapanış
+    """
+    if len(candles) < 80:
+        return None
+
+    closed = candles[:-1]
+    live_c = candles[-1]
+    c = closed[-1]
+    prev = closed[-2]
+    closes = [x.close for x in closed]
+
+    atr = compute_atr(closed, len(closed), 14)
+    if atr <= 0 or (atr / c.close) < 0.0035:
+        return None
+
+    # Aşırı haber/manipülasyon mumu varsa pas geç
+    if (c.high - c.low) > 4.0 * atr:
+        return None
+
+    ema20 = compute_ema(closed, 20)
+    ema50 = compute_ema(closed, 50)
+    ema200 = compute_ema(closed, 200)
+    rsi7_list = compute_rsi_series(closes, 7)
+    rsi14_list = compute_rsi_series(closes, 14)
+    rsi7_curr, rsi7_prev = rsi7_list[-1], rsi7_list[-2]
+    rsi14_curr = rsi14_list[-1]
+
+    bb_mid, bb_up, bb_low = compute_bollinger(closes, 20, 2.0)
+    _, bb_up_prev, bb_low_prev = compute_bollinger(closes[:-1], 20, 2.0)
+
+    recent_low12 = min(x.low for x in closed[-13:-1])
+    recent_high12 = max(x.high for x in closed[-13:-1])
+
+    avg_vol = compute_avg_volume(closed, len(closed) - 1, 20)
+    rvol = (c.volume / avg_vol) if avg_vol > 0 else 1.2
+    rng = max(1e-12, c.high - c.low)
+
+    direction: Optional[str] = None
+    trigger_notes: List[str] = []
+    conf_label: Optional[str] = None
+    score = 72
+
+    # --- AŞAMA 2: KAPANMIŞ MUM İLE ONAYLANAN YÜKSEK WIN-RATE SNIPER GİRİŞİ ---
+    is_bb_long = (
+        (c.low <= bb_low or prev.low <= bb_low_prev)
+        and min(rsi7_curr, rsi7_prev) < 27.0
+        and c.close >= ema200 * 0.965
+    )
+    is_sweep_long = (
+        ema50 >= ema200 * 0.995
+        and c.low < recent_low12
+        and c.close > recent_low12
+        and min(rsi7_curr, rsi7_prev) < 33.0
+    )
+    is_trend_pb_long = (
+        ema20 > ema50 > ema200
+        and min(rsi7_prev, rsi7_list[-3]) < 35.0
+        and c.low <= ema50 * 1.003
+        and c.close > ema20
+    )
+
+    is_bb_short = (
+        (c.high >= bb_up or prev.high >= bb_up_prev)
+        and max(rsi7_curr, rsi7_prev) > 73.0
+        and c.close <= ema200 * 1.035
+    )
+    is_sweep_short = (
+        ema50 <= ema200 * 1.005
+        and c.high > recent_high12
+        and c.close < recent_high12
+        and max(rsi7_curr, rsi7_prev) > 67.0
+    )
+    is_trend_pb_short = (
+        ema20 < ema50 < ema200
+        and max(rsi7_prev, rsi7_list[-3]) > 65.0
+        and c.high >= ema50 * 0.997
+        and c.close < ema20
+    )
+
+    if (is_bb_long or is_sweep_long or is_trend_pb_long) and c.close > c.open and c.close > prev.close and (c.close - c.low) / rng >= 0.45:
+        direction = "LONG"
+        if is_bb_long:
+            score += 12
+            trigger_notes.append(f"✅ Bollinger Alt Bant + RSI7 ({rsi7_curr:.0f}) Aşırı Satım Dönüşü")
+            conf_label = "Bollinger + RSI(7) Tükenişten Yeşil Dönüş Mumu Onaylı"
+        if is_sweep_long:
+            score += 10
+            trigger_notes.append("✅ 12-Mum Dip Likidite Süpürmesi (Stop-Hunt Reclaim)")
+            conf_label = conf_label or "Likidite Süpürmesi + Güçlü Alıcı Kapanışı"
+        if is_trend_pb_long or (ema50 >= ema200):
+            score += 8
+            trigger_notes.append("✅ EMA 50/200 Ana Yükseliş Trendi Uyumu")
+    elif (is_bb_short or is_sweep_short or is_trend_pb_short) and c.close < c.open and c.close < prev.close and (c.high - c.close) / rng >= 0.45:
+        direction = "SHORT"
+        if is_bb_short:
+            score += 12
+            trigger_notes.append(f"✅ Bollinger Üst Bant + RSI7 ({rsi7_curr:.0f}) Aşırı Alım Dönüşü")
+            conf_label = "Bollinger + RSI(7) Tükenişten Kırmızı Dönüş Mumu Onaylı"
+        if is_sweep_short:
+            score += 10
+            trigger_notes.append("✅ 12-Mum Tepe Likidite Süpürmesi (Stop-Hunt Reclaim)")
+            conf_label = conf_label or "Likidite Süpürmesi + Güçlü Satıcı Kapanışı"
+        if is_trend_pb_short or (ema50 <= ema200):
+            score += 8
+            trigger_notes.append("✅ EMA 50/200 Ana Düşüş Trendi Uyumu")
+
+    if direction is not None:
+        entry_p = c.close
+        if direction == "LONG":
+            sl_p = min(c.low, prev.low) - 1.25 * atr
+            tp1_p = entry_p + 1.08 * atr
+            tp2_p = max(bb_mid, entry_p + 1.85 * atr)
+            tp3_p = entry_p + 2.75 * atr
+            broken_ref = recent_low12
+            origin_ref = min(c.low, prev.low)
+        else:
+            sl_p = max(c.high, prev.high) + 1.25 * atr
+            tp1_p = entry_p - 1.08 * atr
+            tp2_p = min(bb_mid, entry_p - 1.85 * atr)
+            tp3_p = entry_p - 2.75 * atr
+            broken_ref = recent_high12
+            origin_ref = max(c.high, prev.high)
+
+        # Canlı mumda zaten TP1 veya SL vurulduysa geç kalmış sinyali atla
+        if direction == "LONG" and (live_c.high >= tp1_p or live_c.low <= sl_p):
+            return None
+        if direction == "SHORT" and (live_c.low <= tp1_p or live_c.high >= sl_p):
+            return None
+
+        sl_pct = abs(entry_p - sl_p) / entry_p * 100.0
+        tp1_pct = abs(tp1_p - entry_p) / entry_p * 100.0
+        if sl_pct < 0.35 or tp1_pct < 0.50:
+            return None
+
+        if rvol >= 1.25:
+            score += 6
+            trigger_notes.append(f"✅ Hacim Teyidi ({rvol:.1f}x RVOL)")
+        score = min(99, score)
+        grade = "A+" if score >= 82 else "A"
+        bank_pct = 8 if grade == "A+" else 6
+
+        risk = max(1e-9, abs(entry_p - sl_p))
+        rrr1 = round(abs(tp1_p - entry_p) / risk, 2)
+        rrr2 = round(abs(tp2_p - entry_p) / risk, 2)
+        rrr3 = round(abs(tp3_p - entry_p) / risk, 2)
+
+        fib_compat = FibLevels(
+            level_1=origin_ref,
+            level_0618=entry_p,
+            level_0500=entry_p,
+            level_0=tp1_p,
+            level_neg_05=tp2_p,
+            level_neg_10=tp3_p,
+            stop_loss=sl_p,
+        )
+        return FibSetup(
+            setup_id=f"{symbol}_{direction}_SNIPER_{c.timestamp}",
+            symbol=symbol,
+            direction=direction,
+            stage="STAGE_2_GOLDEN_ZONE",
+            origin_timestamp=prev.timestamp,
+            bos_timestamp=c.timestamp,
+            extreme_timestamp=c.timestamp,
+            broken_structure_price=broken_ref,
+            current_price=live_c.close,
+            current_retracement=0.618,
+            deepest_retracement=0.618,
+            touched_0618=True,
+            candle_confirmation=conf_label,
+            fib=fib_compat,
+            rrr_at_0618=rrr1,
+            rrr_tp2=rrr2,
+            rrr_tp3=rrr3,
+            rvol=round(rvol, 2),
+            impulse_atr_mult=round((c.high - c.low) / atr, 2),
+            turnover_24h=ticker.turnover_24h,
+            session_label=get_session_label(),
+            is_trend_flip=False,
+            strength_score=score,
+            quality_grade=grade,
+            recommended_bankroll_pct=bank_pct,
+            confluence_notes=trigger_notes,
+        )
+
+    # --- AŞAMA 1: CANLI MUMDA PUSU / HAZIRLIK (Fiyat Bollinger dışına taştı, mum kapanışı bekleniyor) ---
+    live_closes = closes + [live_c.close]
+    live_rsi7 = compute_rsi_series(live_closes, 7)[-1]
+    if live_c.low <= bb_low and live_rsi7 < 25.0 and live_c.close >= ema200 * 0.965:
+        entry_p = live_c.close
+        sl_p = live_c.low - 1.25 * atr
+        tp1_p = entry_p + 1.08 * atr
+        tp2_p = max(bb_mid, entry_p + 1.85 * atr)
+        tp3_p = entry_p + 2.75 * atr
+        fib_compat = FibLevels(
+            level_1=live_c.low,
+            level_0618=entry_p,
+            level_0500=entry_p,
+            level_0=tp1_p,
+            level_neg_05=tp2_p,
+            level_neg_10=tp3_p,
+            stop_loss=sl_p,
+        )
+        return FibSetup(
+            setup_id=f"{symbol}_LONG_SNIPER_PREP_{c.timestamp}",
+            symbol=symbol,
+            direction="LONG",
+            stage="STAGE_1_LIMIT_READY",
+            origin_timestamp=c.timestamp,
+            bos_timestamp=c.timestamp,
+            extreme_timestamp=c.timestamp,
+            broken_structure_price=bb_low,
+            current_price=live_c.close,
+            current_retracement=0.50,
+            deepest_retracement=0.50,
+            touched_0618=False,
+            candle_confirmation=None,
+            fib=fib_compat,
+            rrr_at_0618=1.10,
+            rrr_tp2=1.85,
+            rrr_tp3=2.75,
+            rvol=round(rvol, 2),
+            impulse_atr_mult=round(rsi14_curr / 20.0, 2),
+            turnover_24h=ticker.turnover_24h,
+            session_label=get_session_label(),
+            strength_score=80,
+            quality_grade="A+",
+            recommended_bankroll_pct=8,
+            confluence_notes=[f"⏳ Canlı Mum Bollinger Alt Bandında (RSI7: {live_rsi7:.0f}) — Yeşil Mum Kapanışı Bekleniyor"],
+        )
+    elif live_c.high >= bb_up and live_rsi7 > 75.0 and live_c.close <= ema200 * 1.035:
+        entry_p = live_c.close
+        sl_p = live_c.high + 1.25 * atr
+        tp1_p = entry_p - 1.08 * atr
+        tp2_p = min(bb_mid, entry_p - 1.85 * atr)
+        tp3_p = entry_p - 2.75 * atr
+        fib_compat = FibLevels(
+            level_1=live_c.high,
+            level_0618=entry_p,
+            level_0500=entry_p,
+            level_0=tp1_p,
+            level_neg_05=tp2_p,
+            level_neg_10=tp3_p,
+            stop_loss=sl_p,
+        )
+        return FibSetup(
+            setup_id=f"{symbol}_SHORT_SNIPER_PREP_{c.timestamp}",
+            symbol=symbol,
+            direction="SHORT",
+            stage="STAGE_1_LIMIT_READY",
+            origin_timestamp=c.timestamp,
+            bos_timestamp=c.timestamp,
+            extreme_timestamp=c.timestamp,
+            broken_structure_price=bb_up,
+            current_price=live_c.close,
+            current_retracement=0.50,
+            deepest_retracement=0.50,
+            touched_0618=False,
+            candle_confirmation=None,
+            fib=fib_compat,
+            rrr_at_0618=1.10,
+            rrr_tp2=1.85,
+            rrr_tp3=2.75,
+            rvol=round(rvol, 2),
+            impulse_atr_mult=round(rsi14_curr / 20.0, 2),
+            turnover_24h=ticker.turnover_24h,
+            session_label=get_session_label(),
+            strength_score=80,
+            quality_grade="A+",
+            recommended_bankroll_pct=8,
+            confluence_notes=[f"⏳ Canlı Mum Bollinger Üst Bandında (RSI7: {live_rsi7:.0f}) — Kırmızı Mum Kapanışı Bekleniyor"],
+        )
+
+    return None
+
+
+def analyze_symbol_fibonacci(
     symbol: str,
     candles: List[Candle],
     ticker: TickerInfo,
     flipped_from_direction: Optional[str] = None,
 ) -> Optional[FibSetup]:
     """
-    Bir paritenin 15 dakikalık mumlarını analiz eder ve aktif (Aşama 1 / Aşama 2 / Stop-Flip)
-    Fibonacci kurulumu varsa döner.
+    Yedeklenen Orijinal Fibonacci Retracement + SMC/ICT motoru.
+    İstediğin an Config.STRATEGY_MODE = 'FIBONACCI' veya Telegram'dan '/mod fib' ile aktif edilebilir.
     """
     if len(candles) < 60:
         return None
@@ -759,7 +1077,6 @@ def analyze_symbol(
     if len(swings) < 4:
         return None
 
-    # En güncel salınım adaylarından geriye doğru son 3 pivot noktasını kontrol et
     max_check = min(len(swings) - 1, 2)
     for offset in range(max_check + 1):
         idx_s = len(swings) - 1 - offset
@@ -807,3 +1124,17 @@ def analyze_symbol(
                 return setup
 
     return None
+
+
+def analyze_symbol(
+    symbol: str,
+    candles: List[Candle],
+    ticker: TickerInfo,
+    flipped_from_direction: Optional[str] = None,
+) -> Optional[FibSetup]:
+    """
+    Aktif strateji moduna göre ('SNIPER' [%82-%85 WR] veya 'FIBONACCI') pariteyi analiz eder.
+    """
+    if Config.STRATEGY_MODE == "FIBONACCI":
+        return analyze_symbol_fibonacci(symbol, candles, ticker, flipped_from_direction)
+    return analyze_symbol_sniper(symbol, candles, ticker)

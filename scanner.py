@@ -105,6 +105,87 @@ class ScannerEngine:
         except Exception as exc:
             print(f"[UYARI] state.json kaydedilemedi: {exc}")
 
+    def sync_real_bybit_balance_and_pnl(self) -> None:
+        """
+        Bybit Demo hesabı bağlıysa, teorik hesap yerine doğrudan Bybit'teki GERÇEK bakiyeyi
+        (komisyonlar ve açık işlemler dahil Net Kasa / Equity) ve Bybit'te kapanan gerçek işlemleri
+        çekip senkronize eder. Böylece Telegram ile Bybit arasında 1 kuruş bile fark kalmaz!
+        """
+        if self.dry_run or not self.demo_trader.is_configured:
+            return
+
+        acc = self.demo_trader.get_demo_account_summary()
+        if acc is not None:
+            self.state["wallet_balance"] = acc["wallet_balance"]
+            self.state["unrealised_pnl"] = acc["unrealised_pnl"]
+            self.state["current_bankroll"] = acc["total_equity"]
+
+        # Bybit'te bugün kapanmış gerçek işlemleri (/v5/position/closed-pnl) çek ve daily_events ile eşitle
+        now_tr = datetime.now(TR_TZ)
+        today_key = now_tr.strftime("%Y-%m-%d")
+        day_start_dt = now_tr.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start_ms = int(day_start_dt.timestamp() * 1000)
+
+        closed_list = self.demo_trader.get_closed_pnl_records(start_time_ms=day_start_ms, limit=50)
+        if not closed_list:
+            return
+
+        synced_ids: List[str] = self.state.setdefault("synced_bybit_order_ids", [])
+        daily_events: List[Dict] = self.state.setdefault("daily_events", [])
+
+        # Eskiden yeniye sırala
+        for item in reversed(closed_list):
+            oid = str(item.get("orderId") or "")
+            if not oid or oid in synced_ids:
+                continue
+            synced_ids.append(oid)
+
+            sym = str(item.get("symbol") or "?")
+            # Kapanış emri Buy ise kapanan pozisyon SHORT'tur, Sell ise LONG'dur
+            close_side = str(item.get("side") or "Sell")
+            direction = "SHORT" if close_side == "Buy" else "LONG"
+            try:
+                real_pnl = round(float(item.get("closedPnl") or 0.0), 2)
+                upd_ms = int(item.get("updatedTime") or item.get("createdTime") or int(time.time() * 1000))
+            except Exception:
+                continue
+
+            ev_dt = datetime.fromtimestamp(upd_ms / 1000.0, tz=TR_TZ)
+            if ev_dt.strftime("%Y-%m-%d") != today_key:
+                continue
+
+            # Son 5 dakika içinde aynı sembol için kaydedilmiş teorik bir olay varsa gerçek komisyonlu PnL ile güncelle
+            matched_existing = False
+            for ev in reversed(daily_events):
+                if ev.get("symbol") == sym and abs(int(ev.get("ts", 0)) - upd_ms) < 300_000 and not ev.get("bybit_synced"):
+                    ev["pnl_usd"] = real_pnl
+                    ev["bybit_synced"] = True
+                    matched_existing = True
+                    break
+
+            if not matched_existing:
+                etype = "TP1" if real_pnl >= 0 else "STOP_LOSS"
+                daily_events.append(
+                    {
+                        "setup_id": f"{sym}_{direction}_{oid[:8]}",
+                        "symbol": sym,
+                        "direction": direction,
+                        "grade": "A",
+                        "margin_usd": 8.0,
+                        "event_type": etype,
+                        "pnl_usd": real_pnl,
+                        "trade_total_usd": real_pnl,
+                        "ts": upd_ms,
+                        "hour_key": ev_dt.strftime("%Y-%m-%d_%H"),
+                        "day_key": ev_dt.strftime("%Y-%m-%d"),
+                        "time_str": ev_dt.strftime("%H:%M"),
+                        "bybit_synced": True,
+                    }
+                )
+
+        if len(synced_ids) > 300:
+            self.state["synced_bybit_order_ids"] = synced_ids[-200:]
+
     def _record_trade_event(
         self,
         setup_id: str,
@@ -114,12 +195,21 @@ class ScannerEngine:
     ) -> float:
         """
         Gerçekleşen TP1 / TP2 / TP3 / SL / Başabaş olayını kaydeder ve güncel kasayı günceller.
-        Dönüş: Bu işlemin şu ana kadarki toplam net dolar kâr/zararı.
+        Bybit Demo bağlıysa bakiyeyi doğrudan Bybit'ten okur.
         """
         now_tr = datetime.now(TR_TZ)
-        cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
-        cur_bank = round(cur_bank + pnl_usd, 2)
-        self.state["current_bankroll"] = cur_bank
+        if not self.dry_run and self.demo_trader.is_configured:
+            acc = self.demo_trader.get_demo_account_summary()
+            if acc is not None:
+                self.state["wallet_balance"] = acc["wallet_balance"]
+                self.state["unrealised_pnl"] = acc["unrealised_pnl"]
+                self.state["current_bankroll"] = acc["total_equity"]
+            else:
+                cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
+                self.state["current_bankroll"] = round(cur_bank + pnl_usd, 2)
+        else:
+            cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
+            self.state["current_bankroll"] = round(cur_bank + pnl_usd, 2)
 
         tr["realized_usd"] = round(float(tr.get("realized_usd", 0.0)) + pnl_usd, 2)
 
@@ -128,7 +218,7 @@ class ScannerEngine:
             "symbol": tr.get("symbol", "?"),
             "direction": tr.get("direction", "LONG"),
             "grade": tr.get("quality_grade", "A"),
-            "margin_usd": float(tr.get("margin_usd", 15.0)),
+            "margin_usd": float(tr.get("margin_usd", 8.0)),
             "event_type": event_type,
             "pnl_usd": round(pnl_usd, 2),
             "trade_total_usd": tr["realized_usd"],
@@ -243,8 +333,9 @@ class ScannerEngine:
             flip_watch: Dict[str, Dict] = self.state["flip_watch"]
             tracked_trades: Dict[str, Dict] = self.state.setdefault("tracked_trades", {})
 
-            # 0) Bybit Demo hesabındaki açık pozisyonlarda eksik TP/SL varsa (ör. SOLUSDT) otomatik tamamla ve takibe al!
+            # 0) Bybit Demo hesabındaki gerçek bakiyeyi, kapanan işlemleri ve eksik TP/SL korumalarını senkronize et!
             if not self.dry_run:
+                self.sync_real_bybit_balance_and_pnl()
                 self.demo_trader.sync_and_protect_open_positions(tracked_trades)
 
             # 1) Önce pusuda bekleyen (WAITING_ZONE) veya aktif işlemde olan (IN_TRADE) tüm kurulumları takip et
@@ -679,7 +770,9 @@ class ScannerEngine:
             self.last_scan_time_str = now_tr
             elapsed = time.time() - start_t
 
-            # Saat başı ve gün bitimi otomatik rapor kontrolü
+            # Tarama sonunda Bybit gerçek bakiyesini tekrar güncelle ve saatlik/günlük raporları kontrol et
+            if not self.dry_run:
+                self.sync_real_bybit_balance_and_pnl()
             self.check_and_send_scheduled_reports()
 
             if not self.dry_run:
@@ -690,7 +783,7 @@ class ScannerEngine:
             print(
                 f"[{now_tr}] Tarama #{self.scan_count} tamamlandı ({elapsed:.1f}s) | "
                 f"Parite: {len(klines_map)} | Aktif Pusu (Aşama 1): {s1_total} | "
-                f"Altın Bölgede (Aşama 2): {s2_total} | Kasa: {self.state.get('current_bankroll', 100.0):.2f}$"
+                f"Altın Bölgede (Aşama 2): {s2_total} | Gerçek Kasa: {self.state.get('current_bankroll', 100.0):.2f}$"
             )
             return {
                 "scanned": len(klines_map),
@@ -702,26 +795,33 @@ class ScannerEngine:
             }
 
     def format_status_text(self) -> str:
+        if not self.dry_run:
+            self.sync_real_bybit_balance_and_pnl()
         s1 = sum(1 for s in self.active_setups.values() if s.stage == "STAGE_1_LIMIT_READY")
         s2 = sum(1 for s in self.active_setups.values() if s.stage == "STAGE_2_GOLDEN_ZONE")
         cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
+        wb_val = float(self.state.get("wallet_balance", cur_bank))
+        upnl_val = float(self.state.get("unrealised_pnl", 0.0))
         start_bank = float(self.state.get("day_start_bankroll", Config.DEFAULT_BANKROLL_USD))
         diff = cur_bank - start_bank
         return (
-            f"📊 <b>TARAYICI VE KASA DURUM RAPORU</b>\n"
+            f"📊 <b>TARAYICI VE GERÇEK KASA DURUM RAPORU</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"✅ <b>Durum:</b> Aktif Çalışıyor (15dk Mumlar + SMC/ICT Puanlama)\n"
-            f"🏦 <b>Borsa:</b> Bybit USDT Vadeli (Perpetual)\n"
+            f"🏦 <b>Borsa:</b> Bybit USDT Vadeli (Canlı Senkronize)\n"
             f"🔢 <b>Taranan Parite:</b> {self.last_scanned_symbols_count} yüksek hacimli coin\n"
             f"🔄 <b>Toplam Tarama:</b> {self.scan_count}\n"
             f"🕒 <b>Son Tarama (TSİ):</b> <code>{self.last_scan_time_str}</code>\n"
             f"🎯 <b>Pusudaki Kurulumlar (Aşama 1):</b> {s1}\n"
             f"🔥 <b>Altın Bölgedekiler (Aşama 2):</b> {s2}\n\n"
-            f"💰 <b>Güncel Kasa:</b> <b><code>{cur_bank:.2f}$</code></b> (Bugün: <code>{fmt_usd_signed(diff)}</code>)\n"
+            f"💰 <b>Bybit Net Kasa (Equity):</b> <b><code>{cur_bank:.2f}$</code></b> (Bugün: <code>{fmt_usd_signed(diff)}</code>)\n"
+            f"🏦 <b>Cüzdan Bakiyesi:</b> <code>{wb_val:.2f}$</code> | <b>Açık PnL:</b> <code>{fmt_usd_signed(upnl_val)}</code>\n"
             f"📌 <i>Saatlik ve günlük detaylı TP/SL tablosu için /rapor yazabilirsin.</i>"
         )
 
     def format_live_report_text(self) -> str:
+        if not self.dry_run:
+            self.sync_real_bybit_balance_and_pnl()
         now_tr = datetime.now(TR_TZ)
         now_ms = int(time.time() * 1000)
         one_hour_ago_ms = now_ms - 3600 * 1000

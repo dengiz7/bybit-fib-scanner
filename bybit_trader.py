@@ -174,8 +174,11 @@ class BybitDemoTrader:
         except Exception:
             return str(round(value, 4))
 
-    def get_demo_wallet_balance(self) -> Optional[float]:
-        """Bybit Demo UNIFIED hesabındaki USDT toplam bakiyesini döner."""
+    def get_demo_account_summary(self) -> Optional[Dict[str, float]]:
+        """
+        Bybit Demo UNIFIED hesabındaki gerçek Cüzdan Bakiyesini (walletBalance),
+        Açık İşlemler Dahil Net Varlığı (equity) ve Anlık Açık PnL'i (unrealisedPnl) döner.
+        """
         if not self.is_configured:
             return None
         res = self._request(
@@ -189,16 +192,51 @@ class BybitDemoTrader:
         acc_list = (res.get("result") or {}).get("list") or []
         if not acc_list:
             return None
-        for coin_info in acc_list[0].get("coin", []):
+
+        acc = acc_list[0]
+        for coin_info in acc.get("coin", []):
             if coin_info.get("coin") == "USDT":
                 try:
-                    return float(coin_info.get("walletBalance") or coin_info.get("equity") or 0.0)
+                    wb = float(coin_info.get("walletBalance") or 0.0)
+                    eq = float(coin_info.get("equity") or wb)
+                    upnl = float(coin_info.get("unrealisedPnl") or (eq - wb))
+                    return {
+                        "wallet_balance": round(wb, 2),
+                        "total_equity": round(eq, 2),
+                        "unrealised_pnl": round(upnl, 2),
+                    }
                 except Exception:
-                    return 0.0
+                    break
         try:
-            return float(acc_list[0].get("totalEquity") or 0.0)
+            wb = float(acc.get("totalWalletBalance") or 0.0)
+            eq = float(acc.get("totalEquity") or wb)
+            upnl = float(acc.get("totalPerpUPL") or (eq - wb))
+            return {
+                "wallet_balance": round(wb, 2),
+                "total_equity": round(eq, 2),
+                "unrealised_pnl": round(upnl, 2),
+            }
         except Exception:
             return None
+
+    def get_demo_wallet_balance(self) -> Optional[float]:
+        """Bybit Demo UNIFIED hesabındaki gerçek Net Kasa (Equity) değerini döner."""
+        summary = self.get_demo_account_summary()
+        if summary is None:
+            return None
+        return summary["total_equity"]
+
+    def get_closed_pnl_records(self, start_time_ms: Optional[int] = None, limit: int = 50) -> List[Dict]:
+        """Bybit üzerindeki gerçek kapanmış işlemlerin (komisyon düşülmüş net PnL dahil) listesini çeker."""
+        if not self.is_configured:
+            return []
+        params: Dict[str, str] = {"category": "linear", "limit": str(limit)}
+        if start_time_ms is not None and start_time_ms > 0:
+            params["startTime"] = str(start_time_ms)
+        res = self._request("GET", "/v5/position/closed-pnl", params, signed=True)
+        if res.get("retCode") != 0:
+            return []
+        return (res.get("result") or {}).get("list") or []
 
     def get_open_positions(self, symbol: Optional[str] = None) -> List[Dict]:
         if not self.is_configured:
@@ -619,11 +657,20 @@ class BybitDemoTrader:
                 "olarak eklemen yeterli!"
             )
 
-        wallet_usdt = self.get_demo_wallet_balance()
+        acc_sum = self.get_demo_account_summary()
         open_pos = self.get_open_positions()
         open_orders = self.get_open_orders()
 
-        wallet_str = f"{wallet_usdt:,.2f} USDT" if wallet_usdt is not None else "Bağlantı kontrol ediliyor..."
+        if acc_sum is not None:
+            wb_val = acc_sum["wallet_balance"]
+            eq_val = acc_sum["total_equity"]
+            upnl_val = acc_sum["unrealised_pnl"]
+            wallet_str = (
+                f"<b><code>{eq_val:.2f}$</code></b> "
+                f"(Cüzdan: <code>{wb_val:.2f}$</code> | Açık PnL: <code>{upnl_val:+.2f}$</code>)"
+            )
+        else:
+            wallet_str = f"<code>{virtual_bankroll_usd:.2f}$</code>"
         mode_str = "🟢 AKTİF (Otomatik Emir Açıyor)" if self.enabled else "⏸ DURAKLATILDI (/oto_ac ile başlat)"
 
         pos_lines = []

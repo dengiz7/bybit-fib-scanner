@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
 Bybit V5 Public Market Data İstemcisi (0$ - API Anahtarı Gerektirmez)
-Hem api.bybit.com hem de api.bytick.com (yedek domain) desteklidir.
 """
 
 import json
@@ -37,21 +36,11 @@ class TickerInfo:
 
 
 EXCLUDED_SYMBOLS = {
-    "USDCUSDT",
-    "FDUSDUSDT",
-    "USDEUSDT",
-    "DAIUSDT",
-    "TUSDUSDT",
-    "PYUSDUSDT",
-    "USDDUSDT",
-    "EURUSDT",
-    "GBPUSDT",
-    "CLUSDT",
-    "BZUSDT",
-    "XAUUSDT",
-    "XAGUSDT",
-    "PAXGUSDT",
-    "XAUTUSDT",
+    "USDCUSDT", "FDUSDUSDT", "USDEUSDT", "DAIUSDT", "TUSDUSDT",
+    "PYUSDUSDT", "USDDUSDT", "EURUSDT", "GBPUSDT", "CLUSDT",
+    "BZUSDT", "XAUUSDT", "XAGUSDT", "PAXGUSDT", "XAUTUSDT",
+    "SOXLUSDT", "SOXSUSDT", "NVDAUSDT", "TSLAUSDT", "AAPLUSDT",
+    "COINUSDT", "MSTRUSDT",
 }
 
 
@@ -104,7 +93,6 @@ class BybitClient:
         tickers: List[TickerInfo] = []
         for item in data["result"]["list"]:
             symbol = str(item.get("symbol", ""))
-            # Sadece süresiz USDT vadeli kontratları al (tarihli kontratları ve stabilcoinleri ele)
             if not symbol.endswith("USDT") or "-" in symbol or symbol in EXCLUDED_SYMBOLS:
                 continue
             try:
@@ -135,10 +123,6 @@ class BybitClient:
         interval: str = Config.TIMEFRAME,
         limit: int = Config.KLINE_LIMIT,
     ) -> List[Candle]:
-        """
-        Belirtilen sembol için mum verilerini eskiden yeniye (kronolojik) sıralı döner.
-        Son eleman (candles[-1]) henüz kapanmamış (canlı) mumdur; candles[:-1] kapanmış mumlardır.
-        """
         data = self._get_json(
             "/v5/market/kline",
             {
@@ -155,7 +139,6 @@ class BybitClient:
         if not raw_list:
             return []
 
-        # Bybit yeniden eskiye döner -> kronolojik (eskiden yeniye) çeviriyoruz
         raw_list_chrono = list(reversed(raw_list))
         candles: List[Candle] = []
         total = len(raw_list_chrono)
@@ -184,7 +167,6 @@ class BybitClient:
         limit: int = Config.KLINE_LIMIT,
         max_workers: int = 8,
     ) -> Dict[str, Tuple[TickerInfo, List[Candle]]]:
-        """Tüm sembollerin 15dk mumlarını paralel ve güvenli hızda çeker."""
         results: Dict[str, Tuple[TickerInfo, List[Candle]]] = {}
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_map = {

@@ -1,17 +1,14 @@
 # -*- coding: utf-8 -*-
 """
-The Moving Average (Arty) - Fibonacci Retracement Strateji Motoru (15m Mumlar)
-İki videodaki tüm kuralların harfi harfine matematiksel ve nedensel (causal) uygulaması:
-  1. Kısa vadeli trend tespiti: Yükselişte Higher Lows (HL) + HH, Düşüşte Lower Highs (LH) + LL
-  2. Fitiller (wicks) piyasa yapısına dahildir (Video 1 [03:16])
-  3. Yapı Kırılımı (BoS) için önceki yapı fitil seviyesinin ötesinde MUM KAPANIŞI şarttır (Video 1 [03:24])
-  4. Yatay/testere piyasa (choppy range), devasa haber/manipülasyon mumu (ATR spike) ve düşük hacim elenir
-  5. İtkisel hareket bitip belirgin geri çekilme başladığında 6 seviyeli Fib çizilir: 1, 0.618, 0.5, 0, -0.5, -1
-  6. Aşama 1: 0.618 Limit Emir pususu | Aşama 2: 0.5 - 0.618 Altın Bölge girişi (+ mum onayı kontrolü)
-  7. Stop-Loss (1 seviyesinin hemen dışı) kırılırsa ters yönde trend dönüş izlemesi (Flip Watch) başlar (Video 2 [05:00])
+Hacim Patlaması ve Zirve Kırılımı (RVOL Breakout Sniper) Strateji Motoru
+- 15 Dakikalık Mumlar Üzerinde Donchian (20 Mum) Tavan / Taban Kırılımlarını Tarar
+- Şart 1: Fiyat son 20 mumun (5 saat) zirvesini yukarı (LONG) veya tabanını aşağı (SHORT) kırmalıdır.
+- Şart 2: Kırılım mumu güçlü olmalı (Gövde boyu >= %45, sadece fitil değil, net kapanış!).
+- Şart 3: Kırılım mumu 20 mumluk ortalama hacmin en az 1.8x - 2.0x katı olmalı (RVOL >= 1.8).
+- Şart 4: Komisyonu ezen net kâr hedefi: TP1 en az %1.40 saf fiyat hareketi (15x ile +%21+ kâr).
+- Kâr Alma & Koruma: TP1'de %75 kâr cebe kilitlenir, Stop girişe (Başabaş) çekilir, kalan %25 TP2'ye koşar.
 """
 
-import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
@@ -19,221 +16,55 @@ from typing import Dict, List, Optional
 from bybit_client import Candle, TickerInfo
 from config import Config
 
-MAJOR_SYMBOLS = {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"}
-
 
 @dataclass
-class SwingPoint:
-    idx: int
-    timestamp: int
-    price: float
-    kind: str  # "HIGH" veya "LOW"
-
-
-@dataclass
-class FibLevels:
-    level_1: float       # 1.000 - Başlangıç (Origin)
-    level_0618: float    # 0.618 - Altın Cep (Ana Limit Giriş)
-    level_0500: float    # 0.500 - Altın Bölge Sınırı
-    level_0: float       # 0.000 - Bitiş / Ana Güvenli Hedef (TP1)
-    level_neg_05: float  # -0.500 - 1. Uzatma (TP2 / Trailing)
-    level_neg_10: float  # -1.000 - 2. Uzatma (TP3 / Trailing)
-    stop_loss: float     # 1.000 seviyesinin hemen dışı (%3 leg buffer)
-
-
-@dataclass
-class FibSetup:
+class BreakoutSetup:
     setup_id: str
     symbol: str
     direction: str                  # "LONG" veya "SHORT"
-    stage: str                      # "STAGE_1_LIMIT_READY" | "STAGE_2_GOLDEN_ZONE" | "STOPPED_OUT"
-    origin_timestamp: int
-    bos_timestamp: int
-    extreme_timestamp: int
-    broken_structure_price: float
-    current_price: float
-    current_retracement: float      # 0.0 = hedefte, 0.5 = %50 geri çekilme, 0.618 = altın cep, 1.0 = başlangıçta
-    deepest_retracement: float
-    touched_0618: bool
-    candle_confirmation: Optional[str]  # Bölge içi ret fitili / yutan mum onayı varsa açıklaması
-    fib: FibLevels
-    rrr_at_0618: float
-    rrr_tp2: float = 2.71
-    rrr_tp3: float = 3.93
-    rvol: float = 1.0
-    impulse_atr_mult: float = 1.0
-    turnover_24h: float = 0.0
-    session_label: str = ""
-    is_trend_flip: bool = False
-    strength_score: int = 65
-    quality_grade: str = "A"
-    recommended_bankroll_pct: int = 15
-    confluence_notes: Optional[List[str]] = None
+    breakout_level: float           # Kırılan 20-mum zirvesi veya tabanı
+    entry_price: float              # Kırılım mumu kapanış fiyatı
+    sl_price: float                 # Kırılan seviyenin arkası (1.15x ATR)
+    tp1_price: float                # Ana Kâr Hedefi (%75 Kapanış + Başabaş Stop)
+    tp2_price: float                # İkinci Uzatma Hedefi (Kalan %25)
+    tp1_pct: float                  # TP1 fiyat yüzdesi (Spot %)
+    tp2_pct: float                  # TP2 fiyat yüzdesi (Spot %)
+    sl_pct: float                   # SL fiyat yüzdesi (Spot %)
+    rrr_tp1: float                  # TP1 Risk/Ödül oranı
+    rrr_tp2: float                  # TP2 Risk/Ödül oranı
+    rvol: float                     # Bağıl Hacim Patlama Katsayısı (örn. 2.8x)
+    turnover_24h: float             # 24s Dolar Hacmi
+    session_label: str              # Aktif Seans
+    strength_score: int             # Sinyal Güç Skoru (70 - 100)
+    quality_grade: str              # "A+" veya "A"
+    recommended_margin_usd: float   # Önerilen Marjin Tutarı ($)
+    notes: List[str]                # Kırılım Notları
 
 
-def compute_atr(candles: List[Candle], end_idx: int, period: int = Config.ATR_PERIOD) -> float:
-    """Belirtilen end_idx (dahil değil) öncesindeki mumlar üzerinden ortalama gerçek aralığı (ATR) hesaplar."""
-    start = max(1, end_idx - period)
-    if end_idx <= start:
-        rngs = [c.high - c.low for c in candles[: max(1, end_idx)]]
-        return sum(rngs) / len(rngs) if rngs else 0.0
-
-    trs: List[float] = []
-    for i in range(start, end_idx):
-        high = candles[i].high
-        low = candles[i].low
-        prev_close = candles[i - 1].close
-        tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-        trs.append(tr)
+def compute_atr(candles: List[Candle], period: int = 14) -> float:
+    n = len(candles)
+    if n < 2:
+        return 0.0
+    start = max(1, n - period)
+    trs = []
+    for i in range(start, n):
+        h = candles[i].high
+        l = candles[i].low
+        pc = candles[i - 1].close
+        trs.append(max(h - l, abs(h - pc), abs(l - pc)))
     return sum(trs) / len(trs) if trs else 0.0
 
 
-def compute_avg_volume(candles: List[Candle], end_idx: int, period: int = Config.VOLUME_SMA_PERIOD) -> float:
-    start = max(0, end_idx - period)
-    segment = candles[start:end_idx]
-    if not segment:
+def compute_volume_sma(candles: List[Candle], period: int = 20) -> float:
+    n = len(candles)
+    if n < 1:
         return 0.0
-    return sum(c.volume for c in segment) / len(segment)
-
-
-def compute_ema(candles: List[Candle], period: int) -> float:
-    """Kapanış fiyatları üzerinden Üstel Hareketli Ortalama (EMA) hesaplar."""
-    if not candles:
-        return 0.0
-    if len(candles) <= period:
-        return sum(c.close for c in candles) / len(candles)
-    k = 2.0 / (period + 1.0)
-    ema = sum(c.close for c in candles[:period]) / period
-    for c in candles[period:]:
-        ema = c.close * k + ema * (1.0 - k)
-    return ema
-
-
-def evaluate_confluence_score(
-    closed_candles: List[Candle],
-    origin_idx: int,
-    peak_idx: int,
-    fib: FibLevels,
-    direction: str,
-    rvol: float,
-    impulse_atr_mult: float,
-    efficiency: float,
-    candle_confirmation: Optional[str],
-    is_trend_flip: bool,
-) -> tuple[int, str, int, List[str]]:
-    """
-    Ana Fibonacci stratejisini çorbaya çevirmeden, kurumsal SMC / ICT ve Trend kesişimlerini
-    puanlar (40 - 100 Puan) ve kasanın yüzde kaçıyla girilmesi gerektiğini belirler.
-    Dönüş: (score, grade, bankroll_pct, notes_list)
-    """
-    score = 45  # Temel Arty Fibonacci + BoS + ATR + Verimlilik + Kâr Filtresi taban puanı
-    notes: List[str] = ["✅ Temel Fib + Mum Kapanışlı BoS"]
-
-    leg = abs(fib.level_0 - fib.level_1)
-    gz_low = min(fib.level_0500, fib.level_0618) - 0.10 * leg
-    gz_high = max(fib.level_0500, fib.level_0618) + 0.10 * leg
-
-    # 1) ICT Fair Value Gap (FVG / İmbalans Boşluğu) Kesişimi (+20 Puan)
-    has_fvg_in_gz = False
-    has_any_fvg = False
-    for i in range(max(2, origin_idx + 1), min(len(closed_candles), peak_idx + 1)):
-        c_prev2 = closed_candles[i - 2]
-        c_curr = closed_candles[i]
-        if direction == "LONG" and c_curr.low > c_prev2.high:
-            has_any_fvg = True
-            fvg_bot, fvg_top = c_prev2.high, c_curr.low
-            if max(fvg_bot, gz_low) <= min(fvg_top, gz_high):
-                has_fvg_in_gz = True
-                break
-        elif direction == "SHORT" and c_curr.high < c_prev2.low:
-            has_any_fvg = True
-            fvg_bot, fvg_top = c_curr.high, c_prev2.low
-            if max(fvg_bot, gz_low) <= min(fvg_top, gz_high):
-                has_fvg_in_gz = True
-                break
-
-    if has_fvg_in_gz:
-        score += 20
-        notes.append("✅ Altın Bölgede FVG (İmbalans Mıknatısı)")
-    elif has_any_fvg:
-        score += 10
-        notes.append("✅ İtkisel Dalgada FVG Boşluğu")
-
-    # 2) SMC Order Block (OB / Kurumsal Emir Bloğu Kalkanı) (+15 Puan)
-    has_ob_shield = False
-    ob_start = max(0, origin_idx - 2)
-    ob_end = min(len(closed_candles) - 1, origin_idx + 2)
-    for i in range(ob_start, ob_end + 1):
-        c = closed_candles[i]
-        if direction == "LONG" and c.close < c.open:
-            # Son satıcılı mumun gövde/fitil tavanı 0.618 - 1.000 arasını koruyor mu?
-            if c.high >= fib.level_1 and c.low <= fib.level_0618:
-                has_ob_shield = True
-                break
-        elif direction == "SHORT" and c.close > c.open:
-            if c.low <= fib.level_1 and c.high >= fib.level_0618:
-                has_ob_shield = True
-                break
-
-    if has_ob_shield:
-        score += 15
-        notes.append("✅ 0.618 Arkasında Order Block (OB) Kalkanı")
-
-    # 3) Ana Trend (EMA 50 & EMA 200) Uyumu (+10 Puan)
-    ema50 = compute_ema(closed_candles, 50)
-    ema200 = compute_ema(closed_candles, 200)
-    last_close = closed_candles[-1].close
-    if direction == "LONG":
-        if last_close >= ema50 and ema50 >= ema200:
-            score += 10
-            notes.append("✅ EMA 50/200 Ana Yükseliş Trendi Uyumu")
-        elif last_close >= ema50:
-            score += 6
-            notes.append("✅ EMA 50 Trend Uyumu")
-        else:
-            notes.append("⚠️ Ana Trende Karşı (Tepki/Dönüş İşlemi)")
-    else:
-        if last_close <= ema50 and ema50 <= ema200:
-            score += 10
-            notes.append("✅ EMA 50/200 Ana Düşüş Trendi Uyumu")
-        elif last_close <= ema50:
-            score += 6
-            notes.append("✅ EMA 50 Trend Uyumu")
-        else:
-            notes.append("⚠️ Ana Trende Karşı (Tepki/Dönüş İşlemi)")
-
-    # 4) Hacim Patlaması (RVOL) ve İtkisel Momentum (+10 Puan)
-    if rvol >= 1.50 or (impulse_atr_mult >= 2.2 and efficiency >= 0.55):
-        score += 10
-        notes.append(f"✅ Kurumsal Hacim & Momentum ({rvol:.1f}x RVOL)")
-    elif rvol >= 1.25:
-        score += 5
-
-    # 5) Altın Bölge Mum Onayı (Pin Bar / Engulfing) veya Trend Flip (+10 Puan)
-    if candle_confirmation:
-        score += 10
-        notes.append("✅ Altın Bölge Mum Onaylı (Pin Bar/Engulfing)")
-    elif is_trend_flip:
-        score += 5
-        notes.append("✅ Stop Sonrası Taze Trend Dönüşü (Flip)")
-
-    score = min(100, max(40, score))
-
-    if score >= 80:
-        grade = "A+"
-        bankroll_pct = 8   # 100$ kasada 8$ Marjin (25x İzole = 200$ Pozisyon)
-    elif score >= 65:
-        grade = "A"
-        bankroll_pct = 6   # 100$ kasada 6$ Marjin (25x İzole = 150$ Pozisyon)
-    else:
-        grade = "B"
-        bankroll_pct = 4   # 100$ kasada 4$ Marjin (25x İzole = 100$ Pozisyon)
-
-    return score, grade, bankroll_pct, notes
+    start = max(0, n - period)
+    seg = candles[start:n]
+    return sum(c.volume for c in seg) / len(seg) if seg else 0.0
 
 
 def get_session_label(now_utc: Optional[datetime] = None) -> str:
-    """Londra (07:00-16:00 UTC) ve New York (12:00-21:00 UTC) seans durumunu etiketler."""
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
     h = now_utc.hour
@@ -243,898 +74,152 @@ def get_session_label(now_utc: Optional[datetime] = None) -> str:
         return "🇬🇧 Londra Seansı Aktif"
     if 16 <= h < 21:
         return "🇺🇸 New York Seansı Aktif"
-    return "🌙 Asya / Gece Seansı (Algoritmik Hacim Onaylı)"
+    return "🌙 Asya / Gece Seansı"
 
 
-def extract_market_structure(
-    closed_candles: List[Candle],
-    left: int = Config.PIVOT_LEFT_BARS,
-    right: int = Config.PIVOT_RIGHT_BARS,
-) -> List[SwingPoint]:
-    """
-    Kapanmış mumların FİTİL UÇLARINI (high/low) kullanarak fraktal Swing High ve Swing Low noktalarını bulur
-    ve ardışık (alternating) ZigZag piyasa yapısına dönüştürür.
-    """
-    n = len(closed_candles)
-    if n < left + right + 1:
-        return []
-
-    raw_pivots: List[SwingPoint] = []
-    for i in range(left, n - right):
-        c = closed_candles[i]
-        is_high = all(c.high >= closed_candles[i - k].high for k in range(1, left + 1)) and all(
-            c.high > closed_candles[i + k].high for k in range(1, right + 1)
-        )
-        is_low = all(c.low <= closed_candles[i - k].low for k in range(1, left + 1)) and all(
-            c.low < closed_candles[i + k].low for k in range(1, right + 1)
-        )
-
-        if is_high and not is_low:
-            raw_pivots.append(SwingPoint(idx=i, timestamp=c.timestamp, price=c.high, kind="HIGH"))
-        elif is_low and not is_high:
-            raw_pivots.append(SwingPoint(idx=i, timestamp=c.timestamp, price=c.low, kind="LOW"))
-        elif is_high and is_low:
-            # Çok nadir dıştan yutan mum durumu: mum yönüne göre ata
-            if c.close >= c.open:
-                raw_pivots.append(SwingPoint(idx=i, timestamp=c.timestamp, price=c.high, kind="HIGH"))
-            else:
-                raw_pivots.append(SwingPoint(idx=i, timestamp=c.timestamp, price=c.low, kind="LOW"))
-
-    # Ardışık aynı tip pivotları temizle (iki HIGH üst üste gelirse daha yüksek olanı, iki LOW gelirse daha düşük olanı tut)
-    cleaned: List[SwingPoint] = []
-    for p in raw_pivots:
-        if not cleaned:
-            cleaned.append(p)
-            continue
-        last = cleaned[-1]
-        if last.kind == p.kind:
-            if (p.kind == "HIGH" and p.price >= last.price) or (p.kind == "LOW" and p.price <= last.price):
-                cleaned[-1] = p
-        else:
-            cleaned.append(p)
-
-    return cleaned
-
-
-def build_fib_levels(origin: float, extreme: float, direction: str) -> FibLevels:
-    """Videodaki 6 özel Fibonacci seviyesini (1, 0.618, 0.5, 0, -0.5, -1) ve SL'yi hesaplar."""
-    leg = abs(extreme - origin)
-    buf = Config.SL_BUFFER_RATIO * leg
-
-    if direction == "LONG":
-        # origin = Swing Low (1.0), extreme = Swing High (0.0)
-        return FibLevels(
-            level_1=origin,
-            level_0618=extreme - 0.618 * leg,
-            level_0500=extreme - 0.500 * leg,
-            level_0=extreme,
-            level_neg_05=extreme + 0.500 * leg,
-            level_neg_10=extreme + 1.000 * leg,
-            stop_loss=origin - buf,
-        )
-    else:
-        # SHORT: origin = Swing High (1.0), extreme = Swing Low (0.0)
-        return FibLevels(
-            level_1=origin,
-            level_0618=extreme + 0.618 * leg,
-            level_0500=extreme + 0.500 * leg,
-            level_0=extreme,
-            level_neg_05=extreme - 0.500 * leg,
-            level_neg_10=extreme - 1.000 * leg,
-            stop_loss=origin + buf,
-        )
-
-
-def check_candle_confirmation(
-    closed_candles: List[Candle],
-    from_idx: int,
-    fib: FibLevels,
-    direction: str,
-) -> Optional[str]:
-    """
-    Video 1 [01:33-01:40]: Altın Bölge (0.5 - 0.618) içinde kapanmış mum formasyonu onayı var mı kontrol eder:
-      - Continuation / Rejection Wick (Ret Fitili / Pin Bar)
-      - Bullish / Bearish Engulfing (Yutan Mum)
-    """
-    n = len(closed_candles)
-    for i in range(max(1, from_idx), n):
-        c = closed_candles[i]
-        prev = closed_candles[i - 1]
-        rng = c.high - c.low
-        if rng <= 0:
-            continue
-        body = abs(c.close - c.open)
-
-        if direction == "LONG":
-            # Mum altın bölgeye değmiş ve 0.618/0.5 üzerinde güçlü kapanmış mı?
-            if c.low <= fib.level_0500 and c.low > fib.stop_loss:
-                lower_wick = min(c.open, c.close) - c.low
-                # 1) Güçlü alt ret fitili (Pinbar / Rejection Wick)
-                if lower_wick >= 0.45 * rng and c.close >= c.open and c.close >= fib.level_0618:
-                    return "Altın Bölgede Alıcı Ret Fitili (Pin Bar Onaylı)"
-                # 2) Bullish Engulfing (Boğa Yutan Mum)
-                if (
-                    c.close > c.open
-                    and prev.close < prev.open
-                    and c.close >= prev.open
-                    and c.open <= prev.close
-                ):
-                    return "Altın Bölgede Boğa Yutan Mum (Bullish Engulfing Onaylı)"
-        else:
-            # SHORT
-            if c.high >= fib.level_0500 and c.high < fib.stop_loss:
-                upper_wick = c.high - max(c.open, c.close)
-                # 1) Güçlü üst ret fitili
-                if upper_wick >= 0.45 * rng and c.close <= c.open and c.close <= fib.level_0618:
-                    return "Altın Bölgede Satıcı Ret Fitili (Pin Bar Onaylı)"
-                # 2) Bearish Engulfing (Ayı Yutan Mum)
-                if (
-                    c.close < c.open
-                    and prev.close > prev.open
-                    and c.close <= prev.open
-                    and c.open >= prev.close
-                ):
-                    return "Altın Bölgede Ayı Yutan Mum (Bearish Engulfing Onaylı)"
-    return None
-
-
-def _evaluate_candidate(
-    symbol: str,
-    direction: str,
-    origin_sw: SwingPoint,
-    prev_target_sw: SwingPoint,
-    prev_same_sw: SwingPoint,
-    older_target_sw: Optional[SwingPoint],
-    older_same_sw: Optional[SwingPoint],
-    closed_candles: List[Candle],
-    live_candle: Candle,
-    ticker: TickerInfo,
-    flipped_from_direction: Optional[str] = None,
-) -> Optional[FibSetup]:
-    """Tek bir salınım adayını videodaki tüm filtreler ve nedensel mum simülasyonuyla değerlendirir."""
-    n_closed = len(closed_candles)
-
-    # 1) KISA VADELİ TREND ŞARTI (Video 1 [06:02] & Video 2 [01:51])
-    if direction == "LONG":
-        # Yükseliş trendi: Higher Low (HL) oluşmalı
-        if origin_sw.price <= prev_same_sw.price:
-            return None
-        # Testere (choppy) filtresi: Ya önceki tepeler de yükseliyor olmalı (HH+HL),
-        # ya ardışık 2 Higher Low olmalı, ya da stop sonrası yeni trend dönüşü olmalı
-        has_hh = older_target_sw is None or (prev_target_sw.price > older_target_sw.price)
-        has_2hl = older_same_sw is not None and (prev_same_sw.price > older_same_sw.price)
-        if not (has_hh or has_2hl or flipped_from_direction == "SHORT"):
-            return None
-    else:
-        # Düşüş trendi: Lower High (LH) oluşmalı
-        if origin_sw.price >= prev_same_sw.price:
-            return None
-        has_ll = older_target_sw is None or (prev_target_sw.price < older_target_sw.price)
-        has_2lh = older_same_sw is not None and (prev_same_sw.price < older_same_sw.price)
-        if not (has_ll or has_2lh or flipped_from_direction == "LONG"):
-            return None
-
-    # Origin son ~40 kapanmış mum içinde olmalı
-    if n_closed - 1 - origin_sw.idx > 40:
-        return None
-
-    # 2) YAPI KIRILIMI (BoS) - MUM KAPANIŞI ZORUNLULUĞU (Video 1 [03:24-03:33])
-    bos_idx: Optional[int] = None
-    for i in range(origin_sw.idx + 1, n_closed):
-        c = closed_candles[i]
-        # İtkisel dalga sırasında origin fitili kırıldıysa bu salınım geçersizdir
-        if direction == "LONG" and c.low < origin_sw.price:
-            return None
-        if direction == "SHORT" and c.high > origin_sw.price:
-            return None
-
-        # Önceki yapı fitil seviyesinin ötesinde NET MUM KAPANIŞI
-        if direction == "LONG" and c.close > prev_target_sw.price:
-            bos_idx = i
-            break
-        if direction == "SHORT" and c.close < prev_target_sw.price:
-            bos_idx = i
-            break
-
-    if bos_idx is None:
-        return None
-
-    # BoS taze olmalı (çok eski kurulumları bildirme)
-    if (n_closed - 1 - bos_idx) > Config.MAX_BOS_AGE_CANDLES:
-        return None
-
-    # 3) NEDENSEL (CAUSAL) SAĞ KENAR SİMÜLASYONU:
-    # İtkisel dalganın bittiği uç noktayı (0.0 seviyesi) ve geri çekilme geçmişini adım adım izle
-    peak_idx = origin_sw.idx + 1
-    peak_price = (
-        closed_candles[peak_idx].high if direction == "LONG" else closed_candles[peak_idx].low
-    )
-    for i in range(origin_sw.idx + 1, bos_idx + 1):
-        if direction == "LONG" and closed_candles[i].high >= peak_price:
-            peak_price = closed_candles[i].high
-            peak_idx = i
-        elif direction == "SHORT" and closed_candles[i].low <= peak_price:
-            peak_price = closed_candles[i].low
-            peak_idx = i
-
-    in_golden_zone = False
-    golden_zone_idx = -1
-    touched_0618 = False
-    deepest_retrace = 0.0
-
-    for i in range(bos_idx + 1, n_closed):
-        c = closed_candles[i]
-        leg = abs(peak_price - origin_sw.price)
-        if leg <= 0:
-            return None
-
-        if not in_golden_zone:
-            # Henüz 0.50 Altın Bölgesine değmeden yeni zirve/dip yapıyorsa itkisel hareket devam ediyordur
-            if direction == "LONG" and c.high >= peak_price:
-                peak_price = c.high
-                peak_idx = i
-                deepest_retrace = 0.0
-                continue
-            if direction == "SHORT" and c.low <= peak_price:
-                peak_price = c.low
-                peak_idx = i
-                deepest_retrace = 0.0
-                continue
-
-            fib_now = build_fib_levels(origin_sw.price, peak_price, direction)
-            if (direction == "LONG" and c.low <= fib_now.stop_loss) or (
-                direction == "SHORT" and c.high >= fib_now.stop_loss
-            ):
-                return None
-
-            retrace = (
-                (peak_price - c.low) / leg
-                if direction == "LONG"
-                else (c.high - peak_price) / leg
-            )
-            deepest_retrace = max(deepest_retrace, retrace)
-            if retrace >= Config.GOLDEN_ZONE_MIN:
-                in_golden_zone = True
-                golden_zone_idx = i
-                if retrace >= Config.FIB_LEVEL_0618:
-                    touched_0618 = True
-        else:
-            # Altın Bölgeye zaten girmiş olan kurulumun sonraki mumlardaki sonucu:
-            fib_now = build_fib_levels(origin_sw.price, peak_price, direction)
-            # 1) Stop-Loss patladı mı? -> Video 2 [05:00] Trend Dönüş Sinyali!
-            if (direction == "LONG" and c.low <= fib_now.stop_loss) or (
-                direction == "SHORT" and c.high >= fib_now.stop_loss
-            ):
-                return FibSetup(
-                    setup_id=f"{symbol}_{direction}_{origin_sw.timestamp}",
-                    symbol=symbol,
-                    direction=direction,
-                    stage="STOPPED_OUT",
-                    origin_timestamp=origin_sw.timestamp,
-                    bos_timestamp=closed_candles[bos_idx].timestamp,
-                    extreme_timestamp=closed_candles[peak_idx].timestamp,
-                    broken_structure_price=prev_target_sw.price,
-                    current_price=live_candle.close,
-                    current_retracement=1.05,
-                    deepest_retracement=deepest_retrace,
-                    touched_0618=touched_0618,
-                    candle_confirmation=None,
-                    fib=fib_now,
-                    rrr_at_0618=1.50,
-                    rvol=0.0,
-                    impulse_atr_mult=0.0,
-                    turnover_24h=ticker.turnover_24h,
-                    session_label="",
-                )
-
-            # 2) Take-Profit (0.0 önceki tepe/dip) zaten vuruldu mu? -> Tamamlanmış işlemi bildirme!
-            if (direction == "LONG" and c.high >= fib_now.level_0) or (
-                direction == "SHORT" and c.low <= fib_now.level_0
-            ):
-                return None
-
-            retrace = (
-                (peak_price - c.low) / leg
-                if direction == "LONG"
-                else (c.high - peak_price) / leg
-            )
-            deepest_retrace = max(deepest_retrace, retrace)
-            if retrace >= Config.FIB_LEVEL_0618:
-                touched_0618 = True
-
-    # İtkisel dalganın bitip geri çekilmenin başladığını doğrulamak için peak'ten sonra en az 1 mum kapanmış olmalı
-    if peak_idx >= n_closed - 1 and not in_golden_zone:
-        return None
-
-    # 4) FİBONACCİ'NİN BAŞARISIZ OLDUĞU 3 SENARYO FİLTRELERİ (Video 1 [01:43-02:46, 05:03-05:19])
-    baseline_atr = compute_atr(closed_candles, origin_sw.idx, Config.ATR_PERIOD)
-    if baseline_atr <= 0:
-        return None
-
-    impulse_candles = closed_candles[origin_sw.idx + 1 : peak_idx + 1]
-    if not impulse_candles or len(impulse_candles) > 18:
-        return None
-
-    leg = abs(peak_price - origin_sw.price)
-    impulse_atr_mult = leg / baseline_atr
-
-    # Filtre A: Minimum İtkisel Dalga Boyu (Testere / Gürültü Elemesi)
-    if impulse_atr_mult < Config.MIN_IMPULSE_ATR_MULT:
-        return None
-
-    # Filtre B: İtkisel Verimlilik Oranı (Yatayda zikzak yapan mumları ele)
-    sum_ranges = sum(max(1e-12, ic.high - ic.low) for ic in impulse_candles)
-    efficiency = leg / sum_ranges
-    if efficiency < Config.MIN_IMPULSE_EFFICIENCY:
-        return None
-
-    # Filtre C: Devasa Haber / Manipülasyon Mumu Elemesi ("100 pip monstrous candle" - Video 1 [05:03])
-    max_single_range = max(ic.high - ic.low for ic in impulse_candles)
-    if (max_single_range / baseline_atr) > Config.MAX_SINGLE_CANDLE_ATR_MULT:
-        return None
-
-    # Filtre D: Algoritmik Hacim Filtresi (Ölü saatlerdeki hacimsiz fakeout'ları ele)
-    avg_vol_20 = compute_avg_volume(closed_candles, origin_sw.idx, Config.VOLUME_SMA_PERIOD)
-    if avg_vol_20 > 0:
-        max_imp_vol = max(ic.volume for ic in impulse_candles)
-        avg_imp_vol = sum(ic.volume for ic in impulse_candles) / len(impulse_candles)
-        rvol = max_imp_vol / avg_vol_20
-        avg_rvol = avg_imp_vol / avg_vol_20
-        if rvol < Config.MIN_IMPULSE_MAX_RVOL and avg_rvol < Config.MIN_IMPULSE_AVG_RVOL:
-            return None
-    else:
-        rvol = 1.0
-
-    # 5) CANLI (FORMING) MUM KONTROLÜ VE AŞAMA KARARI
-    if not in_golden_zone:
-        # Canlı mumda yeni zirve/dip yapılıyorsa itkisel hareket hala sürüyordur, bekle
-        if (direction == "LONG" and live_candle.high > peak_price) or (
-            direction == "SHORT" and live_candle.low < peak_price
-        ):
-            return None
-
-    fib = build_fib_levels(origin_sw.price, peak_price, direction)
-
-    # Filtre E: Kasa Büyütme - Minimum Kâr Yüzdesi Şartı (Cılız dalgaları ele)
-    if fib.level_0618 > 0:
-        tp1_move_pct = abs(fib.level_0 - fib.level_0618) / fib.level_0618 * 100.0
-        min_req_pct = Config.MIN_TP1_PCT_MAJORS if symbol in MAJOR_SYMBOLS else Config.MIN_TP1_PCT
-        if tp1_move_pct < min_req_pct:
-            return None
-
-    # Canlı mumda SL patladı mı?
-    if (direction == "LONG" and live_candle.low <= fib.stop_loss) or (
-        direction == "SHORT" and live_candle.high >= fib.stop_loss
-    ):
-        if in_golden_zone:
-            return FibSetup(
-                setup_id=f"{symbol}_{direction}_{origin_sw.timestamp}",
-                symbol=symbol,
-                direction=direction,
-                stage="STOPPED_OUT",
-                origin_timestamp=origin_sw.timestamp,
-                bos_timestamp=closed_candles[bos_idx].timestamp,
-                extreme_timestamp=closed_candles[peak_idx].timestamp,
-                broken_structure_price=prev_target_sw.price,
-                current_price=live_candle.close,
-                current_retracement=1.05,
-                deepest_retracement=deepest_retrace,
-                touched_0618=touched_0618,
-                candle_confirmation=None,
-                fib=fib,
-                rrr_at_0618=1.50,
-                rvol=rvol,
-                impulse_atr_mult=impulse_atr_mult,
-                turnover_24h=ticker.turnover_24h,
-                session_label="",
-            )
-        return None
-
-    # Altın bölgeye daha önce girdiyse ve canlı mumda TP (0.0) vurulduysa işlem bitti
-    if in_golden_zone and (
-        (direction == "LONG" and live_candle.high >= fib.level_0)
-        or (direction == "SHORT" and live_candle.low <= fib.level_0)
-    ):
-        return None
-
-    live_extreme_retrace = (
-        (peak_price - live_candle.low) / leg
-        if direction == "LONG"
-        else (live_candle.high - peak_price) / leg
-    )
-    current_retrace = (
-        (peak_price - live_candle.close) / leg
-        if direction == "LONG"
-        else (live_candle.close - peak_price) / leg
-    )
-
-    deepest_retrace = max(deepest_retrace, live_extreme_retrace)
-    if deepest_retrace >= Config.FIB_LEVEL_0618:
-        touched_0618 = True
-
-    # Risk/Ödül hesabı (0.618 Limit Giriş -> TP1: 0.0, TP2: -0.5, TP3: -1.0)
-    risk = abs(fib.level_0618 - fib.stop_loss)
-    reward_tp1 = abs(fib.level_0 - fib.level_0618)
-    reward_tp2 = abs(fib.level_neg_05 - fib.level_0618)
-    reward_tp3 = abs(fib.level_neg_10 - fib.level_0618)
-    rrr = round(reward_tp1 / risk, 2) if risk > 0 else 1.50
-    rrr_tp2 = round(reward_tp2 / risk, 2) if risk > 0 else 2.71
-    rrr_tp3 = round(reward_tp3 / risk, 2) if risk > 0 else 3.93
-
-    if deepest_retrace >= Config.GOLDEN_ZONE_MIN:
-        # Fiyat Altın Bölgeye değip çoktan TP'ye %75+ yaklaştıysa geç kalınmış sinyal üretme
-        if current_retrace < 0.28:
-            return None
-        conf_start = golden_zone_idx if golden_zone_idx >= 0 else peak_idx + 1
-        confirmation = check_candle_confirmation(closed_candles, conf_start, fib, direction)
-        # Bıçak Tutma (Falling Knife) Koruması: Fiyat 0.786'nın ötesinde kapanmışsa ve henüz Pin Bar/Engulfing
-        # ret onayı yoksa körlemesine Market emir açma!
-        if current_retrace > Config.GOLDEN_ZONE_MAX and confirmation is None:
-            return None
-        stage = "STAGE_2_GOLDEN_ZONE"
-    elif current_retrace >= Config.MIN_RETRACEMENT_STAGE1:
-        confirmation = None
-        stage = "STAGE_1_LIMIT_READY"
-    else:
-        return None
-
-    is_flip = (
-        (direction == "LONG" and flipped_from_direction == "SHORT")
-        or (direction == "SHORT" and flipped_from_direction == "LONG")
-    )
-
-    # Ana Trend (EMA 50 & EMA 200) Koruması: Ters trend (Counter-Trend) gürültü işlemlerini ele!
-    ema50 = compute_ema(closed_candles, 50)
-    ema200 = compute_ema(closed_candles, 200)
-    last_closed_price = closed_candles[-1].close
-    if not is_flip:
-        if direction == "LONG" and not (last_closed_price >= ema50 and ema50 >= ema200 * 0.998):
-            return None
-        if direction == "SHORT" and not (last_closed_price <= ema50 and ema50 <= ema200 * 1.002):
-            return None
-
-    strength_score, quality_grade, bankroll_pct, conf_notes = evaluate_confluence_score(
-        closed_candles=closed_candles,
-        origin_idx=origin_sw.idx,
-        peak_idx=peak_idx,
-        fib=fib,
-        direction=direction,
-        rvol=rvol,
-        impulse_atr_mult=impulse_atr_mult,
-        efficiency=efficiency,
-        candle_confirmation=confirmation,
-        is_trend_flip=is_flip,
-    )
-
-    # Kurumsal SMC / ICT Kesişim Şartı: FVG, Order Block veya Mum Onayı olmayan zayıf B sınıfı (< 65 puan) sinyalleri ele!
-    if strength_score < 65:
-        return None
-
-    return FibSetup(
-        setup_id=f"{symbol}_{direction}_{origin_sw.timestamp}",
-        symbol=symbol,
-        direction=direction,
-        stage=stage,
-        origin_timestamp=origin_sw.timestamp,
-        bos_timestamp=closed_candles[bos_idx].timestamp,
-        extreme_timestamp=closed_candles[peak_idx].timestamp,
-        broken_structure_price=prev_target_sw.price,
-        current_price=live_candle.close,
-        current_retracement=round(current_retrace, 3),
-        deepest_retracement=round(deepest_retrace, 3),
-        touched_0618=touched_0618,
-        candle_confirmation=confirmation,
-        fib=fib,
-        rrr_at_0618=rrr,
-        rrr_tp2=rrr_tp2,
-        rrr_tp3=rrr_tp3,
-        rvol=round(rvol, 2),
-        impulse_atr_mult=round(impulse_atr_mult, 2),
-        turnover_24h=ticker.turnover_24h,
-        session_label=get_session_label(),
-        is_trend_flip=is_flip,
-        strength_score=strength_score,
-        quality_grade=quality_grade,
-        recommended_bankroll_pct=bankroll_pct,
-        confluence_notes=conf_notes,
-    )
-
-
-def compute_rsi_series(closes: List[float], period: int = 7) -> List[float]:
-    """Wilder RSI serisini hesaplar."""
-    n = len(closes)
-    rsis = [50.0] * n
-    if n < period + 1:
-        return rsis
-    gains: List[float] = []
-    losses: List[float] = []
-    for i in range(1, period + 1):
-        d = closes[i] - closes[i - 1]
-        gains.append(max(0.0, d))
-        losses.append(max(0.0, -d))
-    avg_g = sum(gains) / period
-    avg_l = sum(losses) / period
-    rsis[period] = 100.0 if avg_l == 0 else 100.0 - (100.0 / (1.0 + avg_g / avg_l))
-    for i in range(period + 1, n):
-        d = closes[i] - closes[i - 1]
-        avg_g = (avg_g * (period - 1) + max(0.0, d)) / period
-        avg_l = (avg_l * (period - 1) + max(0.0, -d)) / period
-        rsis[i] = 100.0 if avg_l == 0 else 100.0 - (100.0 / (1.0 + avg_g / avg_l))
-    return rsis
-
-
-def compute_bollinger(closes: List[float], period: int = 20, mult: float = 2.0) -> tuple[float, float, float]:
-    """Son mum için Bollinger Orta, Üst ve Alt bantlarını hesaplar."""
-    if not closes:
-        return 0.0, 0.0, 0.0
-    seg = closes[max(0, len(closes) - period) :]
-    m = sum(seg) / len(seg)
-    sd = math.sqrt(sum((x - m) ** 2 for x in seg) / len(seg))
-    return m, m + mult * sd, m - mult * sd
-
-
-def analyze_symbol_sniper(
+def analyze_breakout(
     symbol: str,
     candles: List[Candle],
     ticker: TickerInfo,
-) -> Optional[FibSetup]:
-    """
-    %82.1 - %84.6 Win Rate Kuantum Sniper Stratejisi (15dk):
-      1) Bollinger Bandı (20, 2.0) Dışına Taşma + RSI(7) Aşırı Tükeniş (<27 veya >73) + Güçlü Dönüş Mumu Kapanışı
-      2) Ana Trend (EMA 50 / EMA 200) Yönünde 12-Mum Likidite Süpürmesi (Stop-Hunt Reclaim) + RSI(7) Kancası
-      3) Güçlü Trend (EMA 20 > EMA 50 > EMA 200) İlk RSI(7) Soğuma Geri Çekilmesi + EMA 20 Üzeri Kapanış
-    """
-    if len(candles) < 80:
+    bankroll_usd: float = Config.DEFAULT_BANKROLL_USD,
+) -> Optional[BreakoutSetup]:
+    """15 dakikalık mumlarda Hacim Patlamalı 20-Mum Zirve/Taban Kırılımını analiz eder."""
+    lookback = Config.BREAKOUT_LOOKBACK
+    if len(candles) < lookback + 15:
         return None
 
     closed = candles[:-1]
     live_c = candles[-1]
-    c = closed[-1]
+    c = closed[-1]       # Yeni kapanan kırılım adayı mumu
     prev = closed[-2]
-    closes = [x.close for x in closed]
 
-    atr = compute_atr(closed, len(closed), 14)
-    if atr <= 0 or (atr / c.close) < 0.0035:
+    atr = compute_atr(closed, 14)
+    if atr <= 0:
         return None
 
-    # Aşırı haber/manipülasyon mumu varsa pas geç
-    if (c.high - c.low) > 4.0 * atr:
+    # Devasa anormal manipülasyon mumu varsa (tek mum > 4.5x ATR) ele
+    candle_range = max(1e-12, c.high - c.low)
+    if candle_range > 4.5 * atr:
         return None
 
-    ema20 = compute_ema(closed, 20)
-    ema50 = compute_ema(closed, 50)
-    ema200 = compute_ema(closed, 200)
-    rsi7_list = compute_rsi_series(closes, 7)
-    rsi14_list = compute_rsi_series(closes, 14)
-    rsi7_curr, rsi7_prev = rsi7_list[-1], rsi7_list[-2]
-    rsi14_curr = rsi14_list[-1]
+    # Hacim Hesabı
+    v_sma = compute_volume_sma(closed[:-1], 20)
+    if v_sma <= 0:
+        return None
+    rvol = c.volume / v_sma
 
-    bb_mid, bb_up, bb_low = compute_bollinger(closes, 20, 2.0)
-    _, bb_up_prev, bb_low_prev = compute_bollinger(closes[:-1], 20, 2.0)
+    if rvol < Config.MIN_RVOL:
+        return None
 
-    recent_low12 = min(x.low for x in closed[-13:-1])
-    recent_high12 = max(x.high for x in closed[-13:-1])
+    # Son 'lookback' mumun tavan ve taban seviyeleri (kırılım mumu hariç)
+    window = closed[-(lookback + 1): -1]
+    high_level = max(x.high for x in window)
+    low_level = min(x.low for x in window)
 
-    avg_vol = compute_avg_volume(closed, len(closed) - 1, 20)
-    rvol = (c.volume / avg_vol) if avg_vol > 0 else 1.2
-    rng = max(1e-12, c.high - c.low)
+    body_size = abs(c.close - c.open)
+    body_ratio = body_size / candle_range
+    if body_ratio < Config.MIN_BODY_RATIO:
+        return None
 
-    direction: Optional[str] = None
-    trigger_notes: List[str] = []
-    conf_label: Optional[str] = None
-    score = 72
+    direction = None
+    breakout_level = 0.0
+    notes: List[str] = []
 
-    # --- AŞAMA 2: KAPANMIŞ MUM İLE ONAYLANAN YÜKSEK WIN-RATE SNIPER GİRİŞİ ---
-    is_bb_long = (
-        (c.low <= bb_low or prev.low <= bb_low_prev)
-        and min(rsi7_curr, rsi7_prev) < 27.0
-        and c.close >= ema200 * 0.965
-    )
-    is_sweep_long = (
-        ema50 >= ema200 * 0.995
-        and c.low < recent_low12
-        and c.close > recent_low12
-        and min(rsi7_curr, rsi7_prev) < 33.0
-    )
-    is_trend_pb_long = (
-        ema20 > ema50 > ema200
-        and min(rsi7_prev, rsi7_list[-3]) < 35.0
-        and c.low <= ema50 * 1.003
-        and c.close > ema20
-    )
-
-    is_bb_short = (
-        (c.high >= bb_up or prev.high >= bb_up_prev)
-        and max(rsi7_curr, rsi7_prev) > 73.0
-        and c.close <= ema200 * 1.035
-    )
-    is_sweep_short = (
-        ema50 <= ema200 * 1.005
-        and c.high > recent_high12
-        and c.close < recent_high12
-        and max(rsi7_curr, rsi7_prev) > 67.0
-    )
-    is_trend_pb_short = (
-        ema20 < ema50 < ema200
-        and max(rsi7_prev, rsi7_list[-3]) > 65.0
-        and c.high >= ema50 * 0.997
-        and c.close < ema20
-    )
-
-    if (is_bb_long or is_sweep_long or is_trend_pb_long) and c.close > c.open and c.close > prev.close and (c.close - c.low) / rng >= 0.45:
+    # 1) YUKARI KIRILIM (BULLISH BREAKOUT)
+    if c.close > high_level and c.close > c.open:
         direction = "LONG"
-        if is_bb_long:
-            score += 12
-            trigger_notes.append(f"✅ Bollinger Alt Bant + RSI7 ({rsi7_curr:.0f}) Aşırı Satım Dönüşü")
-            conf_label = "Bollinger + RSI(7) Tükenişten Yeşil Dönüş Mumu Onaylı"
-        if is_sweep_long:
-            score += 10
-            trigger_notes.append("✅ 12-Mum Dip Likidite Süpürmesi (Stop-Hunt Reclaim)")
-            conf_label = conf_label or "Likidite Süpürmesi + Güçlü Alıcı Kapanışı"
-        if is_trend_pb_long or (ema50 >= ema200):
-            score += 8
-            trigger_notes.append("✅ EMA 50/200 Ana Yükseliş Trendi Uyumu")
-    elif (is_bb_short or is_sweep_short or is_trend_pb_short) and c.close < c.open and c.close < prev.close and (c.high - c.close) / rng >= 0.45:
+        breakout_level = high_level
+        notes.append(f"✅ {lookback} Mumluk Zirve Yukarı Kırıldı ({high_level:.4f})")
+        notes.append(f"⚡ Güçlü Hacim Patlaması: {rvol:.1f}x RVOL")
+        notes.append("📈 Güçlü Boğa Mum Gövdesi Onaylandı")
+
+    # 2) AŞAĞI KIRILIM (BEARISH BREAKDOWN)
+    elif c.close < low_level and c.close < c.open:
         direction = "SHORT"
-        if is_bb_short:
-            score += 12
-            trigger_notes.append(f"✅ Bollinger Üst Bant + RSI7 ({rsi7_curr:.0f}) Aşırı Alım Dönüşü")
-            conf_label = "Bollinger + RSI(7) Tükenişten Kırmızı Dönüş Mumu Onaylı"
-        if is_sweep_short:
-            score += 10
-            trigger_notes.append("✅ 12-Mum Tepe Likidite Süpürmesi (Stop-Hunt Reclaim)")
-            conf_label = conf_label or "Likidite Süpürmesi + Güçlü Satıcı Kapanışı"
-        if is_trend_pb_short or (ema50 <= ema200):
-            score += 8
-            trigger_notes.append("✅ EMA 50/200 Ana Düşüş Trendi Uyumu")
+        breakout_level = low_level
+        notes.append(f"✅ {lookback} Mumluk Taban Aşağı Kırıldı ({low_level:.4f})")
+        notes.append(f"⚡ Güçlü Hacim Patlaması: {rvol:.1f}x RVOL")
+        notes.append("📉 Güçlü Ayı Mum Gövdesi Onaylandı")
 
-    if direction is not None:
-        entry_p = c.close
-        if direction == "LONG":
-            sl_p = min(c.low, prev.low) - 1.25 * atr
-            tp1_p = entry_p + 1.08 * atr
-            tp2_p = max(bb_mid, entry_p + 1.85 * atr)
-            tp3_p = entry_p + 2.75 * atr
-            broken_ref = recent_low12
-            origin_ref = min(c.low, prev.low)
-        else:
-            sl_p = max(c.high, prev.high) + 1.25 * atr
-            tp1_p = entry_p - 1.08 * atr
-            tp2_p = min(bb_mid, entry_p - 1.85 * atr)
-            tp3_p = entry_p - 2.75 * atr
-            broken_ref = recent_high12
-            origin_ref = max(c.high, prev.high)
-
-        # Canlı mumda zaten TP1 veya SL vurulduysa geç kalmış sinyali atla
-        if direction == "LONG" and (live_c.high >= tp1_p or live_c.low <= sl_p):
-            return None
-        if direction == "SHORT" and (live_c.low <= tp1_p or live_c.high >= sl_p):
-            return None
-
-        sl_pct = abs(entry_p - sl_p) / entry_p * 100.0
-        tp1_pct = abs(tp1_p - entry_p) / entry_p * 100.0
-        if sl_pct < 0.35 or tp1_pct < 0.50:
-            return None
-
-        if rvol >= 1.25:
-            score += 6
-            trigger_notes.append(f"✅ Hacim Teyidi ({rvol:.1f}x RVOL)")
-        score = min(99, score)
-        grade = "A+" if score >= 82 else "A"
-        bank_pct = 8 if grade == "A+" else 6
-
-        risk = max(1e-9, abs(entry_p - sl_p))
-        rrr1 = round(abs(tp1_p - entry_p) / risk, 2)
-        rrr2 = round(abs(tp2_p - entry_p) / risk, 2)
-        rrr3 = round(abs(tp3_p - entry_p) / risk, 2)
-
-        fib_compat = FibLevels(
-            level_1=origin_ref,
-            level_0618=entry_p,
-            level_0500=entry_p,
-            level_0=tp1_p,
-            level_neg_05=tp2_p,
-            level_neg_10=tp3_p,
-            stop_loss=sl_p,
-        )
-        return FibSetup(
-            setup_id=f"{symbol}_{direction}_SNIPER_{c.timestamp}",
-            symbol=symbol,
-            direction=direction,
-            stage="STAGE_2_GOLDEN_ZONE",
-            origin_timestamp=prev.timestamp,
-            bos_timestamp=c.timestamp,
-            extreme_timestamp=c.timestamp,
-            broken_structure_price=broken_ref,
-            current_price=live_c.close,
-            current_retracement=0.618,
-            deepest_retracement=0.618,
-            touched_0618=True,
-            candle_confirmation=conf_label,
-            fib=fib_compat,
-            rrr_at_0618=rrr1,
-            rrr_tp2=rrr2,
-            rrr_tp3=rrr3,
-            rvol=round(rvol, 2),
-            impulse_atr_mult=round((c.high - c.low) / atr, 2),
-            turnover_24h=ticker.turnover_24h,
-            session_label=get_session_label(),
-            is_trend_flip=False,
-            strength_score=score,
-            quality_grade=grade,
-            recommended_bankroll_pct=bank_pct,
-            confluence_notes=trigger_notes,
-        )
-
-    # --- AŞAMA 1: CANLI MUMDA PUSU / HAZIRLIK (Fiyat Bollinger dışına taştı, mum kapanışı bekleniyor) ---
-    live_closes = closes + [live_c.close]
-    live_rsi7 = compute_rsi_series(live_closes, 7)[-1]
-    if live_c.low <= bb_low and live_rsi7 < 25.0 and live_c.close >= ema200 * 0.965:
-        entry_p = live_c.close
-        sl_p = live_c.low - 1.25 * atr
-        tp1_p = entry_p + 1.08 * atr
-        tp2_p = max(bb_mid, entry_p + 1.85 * atr)
-        tp3_p = entry_p + 2.75 * atr
-        fib_compat = FibLevels(
-            level_1=live_c.low,
-            level_0618=entry_p,
-            level_0500=entry_p,
-            level_0=tp1_p,
-            level_neg_05=tp2_p,
-            level_neg_10=tp3_p,
-            stop_loss=sl_p,
-        )
-        return FibSetup(
-            setup_id=f"{symbol}_LONG_SNIPER_PREP_{c.timestamp}",
-            symbol=symbol,
-            direction="LONG",
-            stage="STAGE_1_LIMIT_READY",
-            origin_timestamp=c.timestamp,
-            bos_timestamp=c.timestamp,
-            extreme_timestamp=c.timestamp,
-            broken_structure_price=bb_low,
-            current_price=live_c.close,
-            current_retracement=0.50,
-            deepest_retracement=0.50,
-            touched_0618=False,
-            candle_confirmation=None,
-            fib=fib_compat,
-            rrr_at_0618=1.10,
-            rrr_tp2=1.85,
-            rrr_tp3=2.75,
-            rvol=round(rvol, 2),
-            impulse_atr_mult=round(rsi14_curr / 20.0, 2),
-            turnover_24h=ticker.turnover_24h,
-            session_label=get_session_label(),
-            strength_score=80,
-            quality_grade="A+",
-            recommended_bankroll_pct=8,
-            confluence_notes=[f"⏳ Canlı Mum Bollinger Alt Bandında (RSI7: {live_rsi7:.0f}) — Yeşil Mum Kapanışı Bekleniyor"],
-        )
-    elif live_c.high >= bb_up and live_rsi7 > 75.0 and live_c.close <= ema200 * 1.035:
-        entry_p = live_c.close
-        sl_p = live_c.high + 1.25 * atr
-        tp1_p = entry_p - 1.08 * atr
-        tp2_p = min(bb_mid, entry_p - 1.85 * atr)
-        tp3_p = entry_p - 2.75 * atr
-        fib_compat = FibLevels(
-            level_1=live_c.high,
-            level_0618=entry_p,
-            level_0500=entry_p,
-            level_0=tp1_p,
-            level_neg_05=tp2_p,
-            level_neg_10=tp3_p,
-            stop_loss=sl_p,
-        )
-        return FibSetup(
-            setup_id=f"{symbol}_SHORT_SNIPER_PREP_{c.timestamp}",
-            symbol=symbol,
-            direction="SHORT",
-            stage="STAGE_1_LIMIT_READY",
-            origin_timestamp=c.timestamp,
-            bos_timestamp=c.timestamp,
-            extreme_timestamp=c.timestamp,
-            broken_structure_price=bb_up,
-            current_price=live_c.close,
-            current_retracement=0.50,
-            deepest_retracement=0.50,
-            touched_0618=False,
-            candle_confirmation=None,
-            fib=fib_compat,
-            rrr_at_0618=1.10,
-            rrr_tp2=1.85,
-            rrr_tp3=2.75,
-            rvol=round(rvol, 2),
-            impulse_atr_mult=round(rsi14_curr / 20.0, 2),
-            turnover_24h=ticker.turnover_24h,
-            session_label=get_session_label(),
-            strength_score=80,
-            quality_grade="A+",
-            recommended_bankroll_pct=8,
-            confluence_notes=[f"⏳ Canlı Mum Bollinger Üst Bandında (RSI7: {live_rsi7:.0f}) — Kırmızı Mum Kapanışı Bekleniyor"],
-        )
-
-    return None
-
-
-def analyze_symbol_fibonacci(
-    symbol: str,
-    candles: List[Candle],
-    ticker: TickerInfo,
-    flipped_from_direction: Optional[str] = None,
-) -> Optional[FibSetup]:
-    """
-    Yedeklenen Orijinal Fibonacci Retracement + SMC/ICT motoru.
-    İstediğin an Config.STRATEGY_MODE = 'FIBONACCI' veya Telegram'dan '/mod fib' ile aktif edilebilir.
-    """
-    if len(candles) < 60:
+    if direction is None:
         return None
 
-    closed_candles = candles[:-1]
-    live_candle = candles[-1]
+    entry_p = c.close
+    tp1_dist = max(Config.TP1_ATR_MULT * atr, entry_p * (Config.MIN_TP1_MOVE_PCT / 100.0))
+    tp2_dist = max(Config.TP2_ATR_MULT * atr, tp1_dist * 1.75)
+    sl_dist = max(Config.SL_ATR_MULT * atr, entry_p * 0.008)
 
-    swings = extract_market_structure(closed_candles)
-    if len(swings) < 4:
+    if direction == "LONG":
+        tp1_p = entry_p + tp1_dist
+        tp2_p = entry_p + tp2_dist
+        sl_p = entry_p - sl_dist
+    else:
+        tp1_p = entry_p - tp1_dist
+        tp2_p = entry_p - tp2_dist
+        sl_p = entry_p + sl_dist
+
+    # Canlı mumda fiyat çoktan TP1'e ulaştıysa veya SL'yi vurduysa geç kalmış sinyali alma
+    if direction == "LONG" and (live_c.high >= tp1_p or live_c.low <= sl_p):
+        return None
+    if direction == "SHORT" and (live_c.low <= tp1_p or live_c.high >= sl_p):
         return None
 
-    max_check = min(len(swings) - 1, 2)
-    for offset in range(max_check + 1):
-        idx_s = len(swings) - 1 - offset
-        if idx_s < 2:
-            break
+    tp1_pct = abs(tp1_p - entry_p) / entry_p * 100.0
+    tp2_pct = abs(tp2_p - entry_p) / entry_p * 100.0
+    sl_pct = abs(entry_p - sl_p) / entry_p * 100.0
 
-        origin_sw = swings[idx_s]
-        prev_target_sw = swings[idx_s - 1]
-        prev_same_sw = swings[idx_s - 2]
-        older_target_sw = swings[idx_s - 3] if idx_s >= 3 else None
-        older_same_sw = swings[idx_s - 4] if idx_s >= 4 else None
+    if tp1_pct < Config.MIN_TP1_MOVE_PCT or sl_pct < 0.35:
+        return None
 
-        if origin_sw.kind == "LOW" and prev_target_sw.kind == "HIGH" and prev_same_sw.kind == "LOW":
-            setup = _evaluate_candidate(
-                symbol=symbol,
-                direction="LONG",
-                origin_sw=origin_sw,
-                prev_target_sw=prev_target_sw,
-                prev_same_sw=prev_same_sw,
-                older_target_sw=older_target_sw,
-                older_same_sw=older_same_sw,
-                closed_candles=closed_candles,
-                live_candle=live_candle,
-                ticker=ticker,
-                flipped_from_direction=flipped_from_direction,
-            )
-            if setup is not None:
-                return setup
+    rrr1 = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 1.50
+    rrr2 = round(tp2_pct / sl_pct, 2) if sl_pct > 0 else 2.60
 
-        elif origin_sw.kind == "HIGH" and prev_target_sw.kind == "LOW" and prev_same_sw.kind == "HIGH":
-            setup = _evaluate_candidate(
-                symbol=symbol,
-                direction="SHORT",
-                origin_sw=origin_sw,
-                prev_target_sw=prev_target_sw,
-                prev_same_sw=prev_same_sw,
-                older_target_sw=older_target_sw,
-                older_same_sw=older_same_sw,
-                closed_candles=closed_candles,
-                live_candle=live_candle,
-                ticker=ticker,
-                flipped_from_direction=flipped_from_direction,
-            )
-            if setup is not None:
-                return setup
+    # Puanlama
+    score = 75
+    if rvol >= 2.5:
+        score += 15
+        notes.append(f"🔥 Devasa Kurumsal Hacim ({rvol:.1f}x)")
+    elif rvol >= 2.0:
+        score += 10
+    if body_ratio >= 0.65:
+        score += 10
+        notes.append("🚀 Kusursuz Momentum Mum Kapanışı")
 
-    return None
+    score = min(99, score)
+    grade = "A+" if score >= 85 else "A"
+
+    # Marjin Hesabı (Kasanın %20'si)
+    margin_usd = max(4.0, round(bankroll_usd * (Config.MARGIN_PER_TRADE_PCT / 100.0), 2))
+
+    return BreakoutSetup(
+        setup_id=f"{symbol}_{direction}_BRK_{c.timestamp}",
+        symbol=symbol,
+        direction=direction,
+        breakout_level=breakout_level,
+        entry_price=entry_p,
+        sl_price=sl_p,
+        tp1_price=tp1_p,
+        tp2_price=tp2_p,
+        tp1_pct=round(tp1_pct, 2),
+        tp2_pct=round(tp2_pct, 2),
+        sl_pct=round(sl_pct, 2),
+        rrr_tp1=rrr1,
+        rrr_tp2=rrr2,
+        rvol=round(rvol, 2),
+        turnover_24h=ticker.turnover_24h,
+        session_label=get_session_label(),
+        strength_score=score,
+        quality_grade=grade,
+        recommended_margin_usd=margin_usd,
+        notes=notes,
+    )
 
 
 def analyze_symbol(
     symbol: str,
     candles: List[Candle],
     ticker: TickerInfo,
-    flipped_from_direction: Optional[str] = None,
-) -> Optional[FibSetup]:
-    """
-    Aktif strateji moduna göre ('SNIPER' [%82-%85 WR] veya 'FIBONACCI') pariteyi analiz eder.
-    """
-    if Config.STRATEGY_MODE == "FIBONACCI":
-        return analyze_symbol_fibonacci(symbol, candles, ticker, flipped_from_direction)
-    return analyze_symbol_sniper(symbol, candles, ticker)
+    bankroll_usd: float = Config.DEFAULT_BANKROLL_USD,
+) -> Optional[BreakoutSetup]:
+    """Ana Tarama Arayüzü: Hacim Patlamalı Kırılımı analiz eder."""
+    return analyze_breakout(symbol, candles, ticker, bankroll_usd)

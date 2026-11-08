@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: bybit-15m-fib-scanner
+    name: bybit-15m-breakout-sniper
     runtime: python
     region: frankfurt
     plan: free
@@ -14,7 +14,13 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: BYBIT_DEMO_API_KEY
+        sync: false
+      - key: BYBIT_DEMO_API_SECRET
+        sync: false
       - key: TOP_SYMBOLS_COUNT
-        value: "75"
+        value: "65"
+      - key: TIMEFRAME
+        value: "15"
       - key: SCAN_INTERVAL_SECONDS
-        value: "45"
+        value: "30"

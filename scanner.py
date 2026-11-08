@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-Ana Tarayıcı Motoru + SMC/ICT Kasa Yönetimi + Saatlik/Günlük Bilanço + 0$ Bulut HTTP Sunucusu
-Hem Windows bilgisayarda tek tıkla anlık çalışır, hem de Render (Frankfurt) + cron-job.org üzerinde 7/24 ücretsiz çalışır.
+Hacim Patlaması & Zirve Kırılımı (Breakout Sniper) Ana Tarayıcı Motoru
+- 15 Dakikalık Mumlar Üzerinde 20-Mum Kırılımlarını ve Anlık Hacim Patlamalarını (RVOL >= 1.8x) Tarar.
+- Bybit Demo Hesabında 15x İzole Kaldıraçla Otomatik Pozisyon Açar.
+- TP1'de (%1.6x ATR) %75 Kârı Kilitler, Stop'u Girişe Çeker; TP2'de (%2.8x ATR) Kalanı Kapatır.
+- 0$ Bulut HTTP Sunucusu (Render) + Telegram Bot Komutları (/rapor, /demo, /kasa 100, /durum, /tara).
 """
 
 import argparse
@@ -16,25 +19,16 @@ from typing import Dict, List, Optional
 from bybit_client import BybitClient
 from bybit_trader import BybitDemoTrader
 from config import STATE_PATH, Config
-from strategy import (
-    FibLevels,
-    FibSetup,
-    analyze_symbol,
-    check_candle_confirmation,
-    get_session_label,
-)
+from strategy import BreakoutSetup, analyze_symbol, get_session_label
 from telegram_notifier import (
     TelegramNotifier,
-    calc_pct_diff,
     fmt_price,
     fmt_usd_signed,
-    format_daily_end_report_message,
     format_hourly_report_message,
     format_setup_message,
     format_tp_hit_message,
 )
 
-# Windows konsolunda Türkçe ve emoji karakterlerin sorunsuz görünmesi için UTF-8 zorla
 try:
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
@@ -55,7 +49,7 @@ class ScannerEngine:
         self.scan_count: int = 0
         self.last_scan_time_str: str = "Henüz taranmadı"
         self.last_scanned_symbols_count: int = 0
-        self.active_setups: Dict[str, FibSetup] = {}
+        self.active_setups: Dict[str, BreakoutSetup] = {}
 
         self.state: Dict = self._load_state()
         self.notifier._last_update_id = int(self.state.get("last_update_id", 0))
@@ -67,7 +61,6 @@ class ScannerEngine:
 
         default_state = {
             "sent_alerts": {},
-            "flip_watch": {},
             "tracked_trades": {},
             "daily_events": [],
             "day_start_bankroll": Config.DEFAULT_BANKROLL_USD,
@@ -94,59 +87,41 @@ class ScannerEngine:
                 keys = list(sent.keys())[-300:]
                 self.state["sent_alerts"] = {k: sent[k] for k in keys}
 
-            now_ms = int(time.time() * 1000)
-            flips = self.state.get("flip_watch", {})
-            self.state["flip_watch"] = {
-                sym: info
-                for sym, info in flips.items()
-                if now_ms - int(info.get("ts", 0)) < 12 * 3600 * 1000
-            }
-            STATE_PATH.write_text(json.dumps(self.state, indent=2, ensure_ascii=False), encoding="utf-8")
+            STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            STATE_PATH.write_text(json.dumps(self.state, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as exc:
-            print(f"[UYARI] state.json kaydedilemedi: {exc}")
+            print(f"[UYARI] State kaydedilemedi: {exc}")
 
     def sync_real_bybit_balance_and_pnl(self) -> None:
-        """
-        Bybit Demo hesabı bağlıysa, teorik hesap yerine doğrudan Bybit'teki GERÇEK bakiyeyi
-        (komisyonlar ve açık işlemler dahil Net Kasa / Equity) ve Bybit'te kapanan gerçek işlemleri
-        çekip senkronize eder. Böylece Telegram ile Bybit arasında 1 kuruş bile fark kalmaz!
-        """
-        if self.dry_run or not self.demo_trader.is_configured:
+        """Bybit Demo hesabındaki gerçek cüzdan bakiyesini ve gerçekleşen PnL kayıtlarını senkronize eder."""
+        if not self.demo_trader.is_configured:
             return
 
-        acc = self.demo_trader.get_demo_account_summary()
-        if acc is not None:
-            self.state["wallet_balance"] = acc["wallet_balance"]
-            self.state["unrealised_pnl"] = acc["unrealised_pnl"]
-            self.state["current_bankroll"] = acc["total_equity"]
+        acc_summary = self.demo_trader.get_demo_account_summary()
+        if acc_summary is not None:
+            self.state["wallet_balance"] = acc_summary["wallet_balance"]
+            self.state["total_equity"] = acc_summary["total_equity"]
+            self.state["unrealised_pnl"] = acc_summary["unrealised_pnl"]
+            self.state["current_bankroll"] = acc_summary["total_equity"]
 
-        # Bybit'te bugün kapanmış gerçek işlemleri (/v5/position/closed-pnl) çek ve daily_events ile eşitle
         now_tr = datetime.now(TR_TZ)
         today_key = now_tr.strftime("%Y-%m-%d")
-        day_start_dt = now_tr.replace(hour=0, minute=0, second=0, microsecond=0)
-        day_start_ms = int(day_start_dt.timestamp() * 1000)
-
-        closed_list = self.demo_trader.get_closed_pnl_records(start_time_ms=day_start_ms, limit=50)
-        if not closed_list:
-            return
-
-        synced_ids: List[str] = self.state.setdefault("synced_bybit_order_ids", [])
         daily_events: List[Dict] = self.state.setdefault("daily_events", [])
+        synced_ids = set(self.state.setdefault("synced_bybit_order_ids", []))
 
-        # Eskiden yeniye sırala
-        for item in reversed(closed_list):
-            oid = str(item.get("orderId") or "")
+        closed_pnl_records = self.demo_trader.get_closed_pnl_records(limit=30)
+        for rec in closed_pnl_records:
+            oid = str(rec.get("orderId") or rec.get("execId") or "")
             if not oid or oid in synced_ids:
                 continue
-            synced_ids.append(oid)
+            synced_ids.add(oid)
 
-            sym = str(item.get("symbol") or "?")
-            # Kapanış emri Buy ise kapanan pozisyon SHORT'tur, Sell ise LONG'dur
-            close_side = str(item.get("side") or "Sell")
-            direction = "SHORT" if close_side == "Buy" else "LONG"
+            sym = rec.get("symbol", "")
+            side = rec.get("side", "")
+            direction = "LONG" if side == "Buy" else "SHORT"
             try:
-                real_pnl = round(float(item.get("closedPnl") or 0.0), 2)
-                upd_ms = int(item.get("updatedTime") or item.get("createdTime") or int(time.time() * 1000))
+                real_pnl = round(float(rec.get("closedPnl") or 0.0), 2)
+                upd_ms = int(rec.get("updatedTime") or time.time() * 1000)
             except Exception:
                 continue
 
@@ -154,24 +129,23 @@ class ScannerEngine:
             if ev_dt.strftime("%Y-%m-%d") != today_key:
                 continue
 
-            # Son 5 dakika içinde aynı sembol için kaydedilmiş teorik bir olay varsa gerçek komisyonlu PnL ile güncelle
-            matched_existing = False
+            matched = False
             for ev in reversed(daily_events):
                 if ev.get("symbol") == sym and abs(int(ev.get("ts", 0)) - upd_ms) < 300_000 and not ev.get("bybit_synced"):
                     ev["pnl_usd"] = real_pnl
                     ev["bybit_synced"] = True
-                    matched_existing = True
+                    matched = True
                     break
 
-            if not matched_existing:
+            if not matched:
                 etype = "TP1" if real_pnl >= 0 else "STOP_LOSS"
                 daily_events.append(
                     {
                         "setup_id": f"{sym}_{direction}_{oid[:8]}",
                         "symbol": sym,
                         "direction": direction,
-                        "grade": "A",
-                        "margin_usd": 8.0,
+                        "grade": "A+",
+                        "margin_usd": 20.0,
                         "event_type": etype,
                         "pnl_usd": real_pnl,
                         "trade_total_usd": real_pnl,
@@ -184,7 +158,7 @@ class ScannerEngine:
                 )
 
         if len(synced_ids) > 300:
-            self.state["synced_bybit_order_ids"] = synced_ids[-200:]
+            self.state["synced_bybit_order_ids"] = list(synced_ids)[-200:]
 
     def _record_trade_event(
         self,
@@ -193,10 +167,6 @@ class ScannerEngine:
         event_type: str,
         pnl_usd: float,
     ) -> float:
-        """
-        Gerçekleşen TP1 / TP2 / TP3 / SL / Başabaş olayını kaydeder ve güncel kasayı günceller.
-        Bybit Demo bağlıysa bakiyeyi doğrudan Bybit'ten okur.
-        """
         now_tr = datetime.now(TR_TZ)
         if not self.dry_run and self.demo_trader.is_configured:
             acc = self.demo_trader.get_demo_account_summary()
@@ -217,8 +187,8 @@ class ScannerEngine:
             "setup_id": setup_id,
             "symbol": tr.get("symbol", "?"),
             "direction": tr.get("direction", "LONG"),
-            "grade": tr.get("quality_grade", "A"),
-            "margin_usd": float(tr.get("margin_usd", 8.0)),
+            "grade": tr.get("quality_grade", "A+"),
+            "margin_usd": float(tr.get("margin_usd", 20.0)),
             "event_type": event_type,
             "pnl_usd": round(pnl_usd, 2),
             "trade_total_usd": tr["realized_usd"],
@@ -231,12 +201,7 @@ class ScannerEngine:
         return tr["realized_usd"]
 
     def check_and_send_scheduled_reports(self) -> None:
-        """
-        1) Her saat başı (01:00, 02:00 ... 23:00 TSİ):
-           Son 1 saat içinde olan TP/SL'leri + Günün genel durumunu gönderir.
-        2) Gün bitiminde (00:00 TSİ):
-           Tamamlanan günün 24 saatlik TP/SL ve Kasa Kazanç bilançosunu gönderir ve yeni günü başlatır.
-        """
+        """Her saat başı durum ve bilanço raporunu Telegram'a gönderir."""
         if self.dry_run or not self.notifier.is_configured:
             return
 
@@ -247,28 +212,9 @@ class ScannerEngine:
         saved_day_key = self.state.get("current_day_key", today_key)
         saved_hour_key = self.state.get("last_hourly_report_key", hour_key)
 
-        # A) Gün değiştiyse (Saat 00:00 TSİ) -> Önce Gün Sonu Bilançosunu gönder!
+        # Gün değişimi (00:00 TSİ)
         if today_key != saved_day_key:
-            daily_events = self.state.get("daily_events", [])
-            day_start_bank = float(self.state.get("day_start_bankroll", Config.DEFAULT_BANKROLL_USD))
             day_end_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
-
-            try:
-                dt_prev = datetime.strptime(saved_day_key, "%Y-%m-%d")
-                day_label = dt_prev.strftime("%d.%m.%Y")
-            except Exception:
-                day_label = saved_day_key
-
-            eod_msg = format_daily_end_report_message(
-                day_label=day_label,
-                daily_events=daily_events,
-                day_start_bankroll=day_start_bank,
-                day_end_bankroll=day_end_bank,
-            )
-            if self.notifier.send_message(eod_msg):
-                print(f"[TELEGRAM GÖNDERİLDİ] Gün Sonu Bilançosu ({day_label})")
-
-            # Yeni gün için sayaçları sıfırla, kasayı yeni güne devret
             self.state["daily_events"] = []
             self.state["day_start_bankroll"] = day_end_bank
             self.state["current_day_key"] = today_key
@@ -276,7 +222,7 @@ class ScannerEngine:
             self._save_state()
             return
 
-        # B) Saat değiştiyse (Saat başı: 01:00, 02:00 ... 23:00 TSİ) -> Saatlik + Genel Durum Raporu gönder!
+        # Saat başı raporu
         if hour_key != saved_hour_key:
             now_ms = int(time.time() * 1000)
             one_hour_ago_ms = now_ms - 3650 * 1000
@@ -292,15 +238,13 @@ class ScannerEngine:
 
             tracked = self.state.get("tracked_trades", {})
             in_trade_cnt = sum(1 for t in tracked.values() if t.get("status") == "IN_TRADE")
-            waiting_cnt = sum(1 for t in tracked.values() if t.get("status") == "WAITING_ZONE")
 
             hourly_msg = format_hourly_report_message(
                 window_label=window_label,
                 day_label=day_label,
                 hour_events=hour_events,
                 daily_events=daily_events,
-                active_in_trade_count=in_trade_cnt,
-                active_waiting_count=waiting_cnt,
+                active_trades_count=in_trade_cnt,
                 day_start_bankroll=float(self.state.get("day_start_bankroll", Config.DEFAULT_BANKROLL_USD)),
                 current_bankroll=float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD)),
                 is_manual=False,
@@ -312,7 +256,7 @@ class ScannerEngine:
             self._save_state()
 
     def run_single_scan(self) -> Dict[str, int]:
-        """Tüm yüksek hacimli Bybit USDT vadeli paritelerini tarar, aktif işlemleri ve raporları yönetir."""
+        """Yüksek hacimli pariteleri tarar, açık işlemleri yönetir ve yeni kırılımlarda pozisyon açar."""
         with self._lock:
             start_t = time.time()
             tickers = self.bybit.get_top_usdt_perpetuals(
@@ -325,20 +269,18 @@ class ScannerEngine:
                 limit=Config.KLINE_LIMIT,
             )
 
-            current_active: Dict[str, FibSetup] = {}
-            stage1_sent = 0
-            stage2_sent = 0
+            current_active: Dict[str, BreakoutSetup] = {}
+            breakout_sent = 0
 
             sent_alerts: Dict[str, List[str]] = self.state["sent_alerts"]
-            flip_watch: Dict[str, Dict] = self.state["flip_watch"]
             tracked_trades: Dict[str, Dict] = self.state.setdefault("tracked_trades", {})
 
-            # 0) Bybit Demo hesabındaki gerçek bakiyeyi, kapanan işlemleri ve eksik TP/SL korumalarını senkronize et!
+            # 0) Demo bakiye ve pozisyon koruma senkronizasyonu
             if not self.dry_run:
                 self.sync_real_bybit_balance_and_pnl()
                 self.demo_trader.sync_and_protect_open_positions(tracked_trades)
 
-            # 1) Önce pusuda bekleyen (WAITING_ZONE) veya aktif işlemde olan (IN_TRADE) tüm kurulumları takip et
+            # 1) Açık takip edilen pozisyonların TP1, TP2 ve Stop-Loss kontrolleri
             for tid, tr in list(tracked_trades.items()):
                 sym = tr.get("symbol")
                 if sym not in klines_map:
@@ -348,434 +290,187 @@ class ScannerEngine:
                     continue
 
                 direction = tr["direction"]
-                status = tr.get("status", "IN_TRADE")
-                extreme_ts = int(tr.get("extreme_ts", 0))
-                level_1 = float(tr.get("level_1", tr.get("current_sl", 0)))
-                level_0618 = float(tr["entry_0618"])
-                level_0500 = float(tr.get("level_0500", level_0618))
-                tp1_val = float(tr["tp1"])
-                tp2_val = float(tr["tp2"])
-                tp3_val = float(tr["tp3"])
-                leg = abs(tp1_val - level_1) if abs(tp1_val - level_1) > 0 else 1e-9
-
-                post_candles = [c for c in sym_candles if c.timestamp > extreme_ts]
+                entry_ts = int(tr.get("entry_ts", 0))
+                post_candles = [c for c in sym_candles if c.timestamp > entry_ts]
                 if not post_candles:
                     continue
 
-                if status == "WAITING_ZONE":
-                    entered_zone = False
-                    zone_ts = 0
-                    deepest_ret = 0.0
-                    touched_618 = False
-                    invalidated = False
+                bar_high = max(c.high for c in post_candles)
+                bar_low = min(c.low for c in post_candles)
+                live_c = sym_candles[-1]
 
-                    for c in post_candles:
-                        init_sl = float(tr["initial_sl"])
-                        if (direction == "LONG" and c.low <= init_sl) or (
-                            direction == "SHORT" and c.high >= init_sl
-                        ):
-                            invalidated = True
-                            break
+                tp1_p = float(tr.get("tp1_price") or tr.get("tp1", 0.0))
+                tp2_p = float(tr.get("tp2_price") or tr.get("tp2", 0.0))
+                active_sl = float(tr.get("current_sl") or tr.get("initial_sl", 0.0))
+                entry_p = float(tr.get("entry_price") or tr.get("entry_0618", 0.0))
 
-                        if not entered_zone:
-                            if (direction == "LONG" and c.close > tp1_val) or (
-                                direction == "SHORT" and c.close < tp1_val
-                            ):
-                                demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "MISSED_NO_PULLBACK")
-                                if not self.dry_run and self.notifier.is_configured:
-                                    m_txt = format_tp_hit_message(
-                                        tr,
-                                        "MISSED_NO_PULLBACK",
-                                        c.close,
-                                        current_bankroll=float(self.state.get("current_bankroll", 100.0)),
-                                    )
-                                    if demo_note:
-                                        m_txt += f"\n\n{demo_note}"
-                                    self.notifier.send_message(m_txt)
-                                    print(f"[TELEGRAM GÖNDERİLDİ] Pusu İptal (Altın Bölgeye Dönmeden Gitti) -> {sym}")
-                                invalidated = True
-                                break
+                margin_usd = float(tr.get("margin_usd", 20.0))
+                pos_usd = margin_usd * Config.DEFAULT_LEVERAGE
+                hits: List[str] = tr.setdefault("hits", [])
+                cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
 
-                        ret = (
-                            (tp1_val - c.low) / leg
-                            if direction == "LONG"
-                            else (c.high - tp1_val) / leg
+                # --- STOP KONTROLÜ ---
+                hit_sl = (direction == "LONG" and live_c.low <= active_sl) or (
+                    direction == "SHORT" and live_c.high >= active_sl
+                )
+
+                if hit_sl:
+                    if "TP1" in hits:
+                        # Başabaş Stop (+0 zarar)
+                        tot_usd = self._record_trade_event(tid, tr, "BREAKEVEN_STOP", 0.0)
+                        demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "BREAKEVEN_STOP") if not self.dry_run else ""
+                        if not self.dry_run and self.notifier.is_configured:
+                            m_txt = format_tp_hit_message(
+                                tr,
+                                "BREAKEVEN_STOP",
+                                live_c.close,
+                                event_pnl_usd=0.0,
+                                total_trade_pnl_usd=tot_usd,
+                                current_bankroll=cur_bank,
+                            )
+                            if demo_note:
+                                m_txt += f"\n\n{demo_note}"
+                            self.notifier.send_message(m_txt)
+                    else:
+                        # Normal Stop-Loss
+                        sl_ratio = abs(entry_p - active_sl) / entry_p if entry_p > 0 else 0.015
+                        loss_usd = -1.0 * pos_usd * sl_ratio
+                        tot_usd = self._record_trade_event(tid, tr, "STOP_LOSS", loss_usd)
+                        demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "STOP_LOSS") if not self.dry_run else ""
+                        if not self.dry_run and self.notifier.is_configured:
+                            m_txt = format_tp_hit_message(
+                                tr,
+                                "STOP_LOSS",
+                                live_c.close,
+                                event_pnl_usd=loss_usd,
+                                total_trade_pnl_usd=tot_usd,
+                                current_bankroll=cur_bank,
+                            )
+                            if demo_note:
+                                m_txt += f"\n\n{demo_note}"
+                            self.notifier.send_message(m_txt)
+
+                    del tracked_trades[tid]
+                    continue
+
+                # --- TP2 KONTROLÜ (Nihai Hedef) ---
+                hit_tp2 = (direction == "LONG" and bar_high >= tp2_p) or (
+                    direction == "SHORT" and bar_low <= tp2_p
+                )
+                if hit_tp2 and "TP2" not in hits:
+                    hits.append("TP2")
+                    tp2_ratio = abs(tp2_p - entry_p) / entry_p if entry_p > 0 else 0.03
+                    rem_gain_usd = (1.0 - Config.TP1_CLOSE_PCT) * pos_usd * tp2_ratio
+                    tot_usd = self._record_trade_event(tid, tr, "TP2", rem_gain_usd)
+                    demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP2") if not self.dry_run else ""
+                    if not self.dry_run and self.notifier.is_configured:
+                        m_txt = format_tp_hit_message(
+                            tr,
+                            "TP2",
+                            live_c.close,
+                            event_pnl_usd=rem_gain_usd,
+                            total_trade_pnl_usd=tot_usd,
+                            current_bankroll=cur_bank,
                         )
-                        if ret > deepest_ret:
-                            deepest_ret = ret
-                        if ret >= 0.618:
-                            touched_618 = True
-                        if ret >= Config.GOLDEN_ZONE_MIN and not entered_zone:
-                            entered_zone = True
-                            zone_ts = c.timestamp
+                        if demo_note:
+                            m_txt += f"\n\n{demo_note}"
+                        self.notifier.send_message(m_txt)
+                        print(f"[TELEGRAM GÖNDERİLDİ] TP2 Vuruldu -> {sym} ({direction}) (+{rem_gain_usd:.2f}$)")
+                    del tracked_trades[tid]
+                    continue
 
-                    if invalidated:
-                        del tracked_trades[tid]
-                        continue
+                # --- TP1 KONTROLÜ (%75 Kâr Kilidi + SL Girişe Çekilir) ---
+                hit_tp1 = (direction == "LONG" and bar_high >= tp1_p) or (
+                    direction == "SHORT" and bar_low <= tp1_p
+                )
+                if hit_tp1 and "TP1" not in hits:
+                    hits.append("TP1")
+                    tr["current_sl"] = entry_p  # Stop'u başabaş (giriş) seviyesine çek
+                    tp1_ratio = abs(tp1_p - entry_p) / entry_p if entry_p > 0 else 0.016
+                    gain_tp1_usd = Config.TP1_CLOSE_PCT * pos_usd * tp1_ratio
+                    tot_usd = self._record_trade_event(tid, tr, "TP1", gain_tp1_usd)
+                    demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP1") if not self.dry_run else ""
+                    if not self.dry_run and self.notifier.is_configured:
+                        m_txt = format_tp_hit_message(
+                            tr,
+                            "TP1",
+                            live_c.close,
+                            event_pnl_usd=gain_tp1_usd,
+                            total_trade_pnl_usd=tot_usd,
+                            current_bankroll=cur_bank,
+                        )
+                        if demo_note:
+                            m_txt += f"\n\n{demo_note}"
+                        self.notifier.send_message(m_txt)
+                        print(f"[TELEGRAM GÖNDERİLDİ] TP1 Vuruldu -> {sym} ({direction}) (+{gain_tp1_usd:.2f}$)")
 
-                    if entered_zone:
-                        tr["status"] = "IN_TRADE"
-                        tr["zone_entry_ts"] = zone_ts
-                        status = "IN_TRADE"
-                        already_sent = sent_alerts.get(tid, [])
-                        if "STAGE_2" not in already_sent:
-                            live_c = sym_candles[-1]
-                            cur_ret = (
-                                (tp1_val - live_c.close) / leg
-                                if direction == "LONG"
-                                else (live_c.close - tp1_val) / leg
-                            )
-                            fib_obj = FibLevels(
-                                level_1=level_1,
-                                level_0618=level_0618,
-                                level_0500=level_0500,
-                                level_0=tp1_val,
-                                level_neg_05=tp2_val,
-                                level_neg_10=tp3_val,
-                                stop_loss=float(tr["initial_sl"]),
-                            )
-                            conf = check_candle_confirmation(
-                                sym_candles[:-1], max(1, len(sym_candles) - 8), fib_obj, direction
-                            )
-                            score = int(tr.get("strength_score", 70))
-                            notes = list(tr.get("confluence_notes", ["✅ Temel Fib + BoS"]))
-                            if conf and not any("Mum Onaylı" in n for n in notes):
-                                score = min(100, score + 10)
-                                notes.append("✅ Altın Bölge Mum Onaylı (Pin Bar/Engulfing)")
-                            grade = "A+" if score >= 80 else ("A" if score >= 65 else "B")
-                            bank_pct = 8 if grade == "A+" else (6 if grade == "A" else 4)
-                            cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
-                            tr["strength_score"] = score
-                            tr["quality_grade"] = grade
-                            tr["bankroll_pct"] = bank_pct
-                            tr["margin_usd"] = round(cur_bank * (bank_pct / 100.0), 2)
-                            tr["confluence_notes"] = notes
-
-                            s2_setup = FibSetup(
-                                setup_id=tid,
-                                symbol=sym,
-                                direction=direction,
-                                stage="STAGE_2_GOLDEN_ZONE",
-                                origin_timestamp=int(tr.get("origin_ts", extreme_ts)),
-                                bos_timestamp=int(tr.get("bos_ts", extreme_ts)),
-                                extreme_timestamp=extreme_ts,
-                                broken_structure_price=float(tr.get("broken_price", tp1_val)),
-                                current_price=live_c.close,
-                                current_retracement=round(cur_ret, 3),
-                                deepest_retracement=round(deepest_ret, 3),
-                                touched_0618=touched_618,
-                                candle_confirmation=conf,
-                                fib=fib_obj,
-                                rrr_at_0618=float(tr.get("rrr_tp1", 1.50)),
-                                rrr_tp2=float(tr.get("rrr_tp2", 2.71)),
-                                rrr_tp3=float(tr.get("rrr_tp3", 3.93)),
-                                rvol=float(tr.get("rvol", 1.2)),
-                                impulse_atr_mult=float(tr.get("atr_mult", 1.8)),
-                                turnover_24h=ticker_obj.turnover_24h,
-                                session_label=get_session_label(),
-                                strength_score=score,
-                                quality_grade=grade,
-                                recommended_bankroll_pct=bank_pct,
-                                confluence_notes=notes,
-                            )
-                            msg = format_setup_message(s2_setup, "STAGE_2", current_bankroll=cur_bank)
-                            if not self.dry_run:
-                                _, demo_note = self.demo_trader.place_setup_order(s2_setup, "STAGE_2", cur_bank)
-                                if demo_note:
-                                    msg += f"\n\n{demo_note}"
-                            if not self.dry_run and self.notifier.is_configured:
-                                if self.notifier.send_message(msg):
-                                    already_sent.append("STAGE_2")
-                                    sent_alerts[tid] = already_sent
-                                    stage2_sent += 1
-                                    print(f"[TELEGRAM GÖNDERİLDİ] Pusu Altın Bölgeye Girdi (Aşama 2) -> {sym} ({direction})")
-
-                if status == "IN_TRADE":
-                    zone_entry_ts = int(tr.get("zone_entry_ts", extreme_ts))
-                    trade_candles = [c for c in sym_candles if c.timestamp > zone_entry_ts]
-                    if not trade_candles:
-                        continue
-
-                    bar_high = max(c.high for c in trade_candles)
-                    bar_low = min(c.low for c in trade_candles)
-                    live_c = sym_candles[-1]
-                    hits: List[str] = tr.setdefault("hits", [])
-                    active_sl = float(tr["current_sl"])
-                    margin_usd = float(tr.get("margin_usd", 8.0))
-                    base_pos_usd = margin_usd * Config.DEFAULT_LEVERAGE
-                    sl_pct_init = max(0.2, calc_pct_diff(level_0618, float(tr["initial_sl"])))
-                    cur_bank_ref = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
-                    max_risk_usd = max(1.50, cur_bank_ref * (Config.MAX_RISK_PCT_PER_TRADE / 100.0))
-                    pos_usd = min(base_pos_usd, max_risk_usd / (sl_pct_init / 100.0))
-                    tp1_close_ratio = Config.TP1_CLOSE_PCT
-                    rem_half_ratio = max(0.05, (1.0 - tp1_close_ratio) / 2.0)
-
-                    # Stop kontrolü (TP1 öncesi Tam Stop, TP1 sonrası Başabaş, TP2 sonrası TP1 İz Süren Stop)
-                    if (direction == "LONG" and live_c.low <= active_sl) or (
-                        direction == "SHORT" and live_c.high >= active_sl
-                    ):
-                        if "TP1" not in hits:
-                            loss_usd = -1.0 * pos_usd * (sl_pct_init / 100.0)
-                            tot_usd = self._record_trade_event(tid, tr, "STOP_LOSS", loss_usd)
-                            flip_watch[sym] = {"stopped_dir": direction, "ts": int(time.time() * 1000)}
-                            demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "STOP_LOSS") if not self.dry_run else ""
-                            if not self.dry_run and self.notifier.is_configured:
-                                m_txt = format_tp_hit_message(
-                                    tr,
-                                    "STOP_LOSS",
-                                    live_c.close,
-                                    event_pnl_usd=loss_usd,
-                                    total_trade_pnl_usd=tot_usd,
-                                    current_bankroll=float(self.state["current_bankroll"]),
-                                )
-                                if demo_note:
-                                    m_txt += f"\n\n{demo_note}"
-                                self.notifier.send_message(m_txt)
-                        elif "TP2" not in hits:
-                            tot_usd = self._record_trade_event(tid, tr, "BREAKEVEN_STOP", 0.0)
-                            demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "BREAKEVEN_STOP") if not self.dry_run else ""
-                            if not self.dry_run and self.notifier.is_configured:
-                                m_txt = format_tp_hit_message(
-                                    tr,
-                                    "BREAKEVEN_STOP",
-                                    live_c.close,
-                                    event_pnl_usd=0.0,
-                                    total_trade_pnl_usd=tot_usd,
-                                    current_bankroll=float(self.state["current_bankroll"]),
-                                )
-                                if demo_note:
-                                    m_txt += f"\n\n{demo_note}"
-                                self.notifier.send_message(m_txt)
-                        else:
-                            tp1_pct = calc_pct_diff(level_0618, tp1_val)
-                            rem_gain_usd = rem_half_ratio * pos_usd * (tp1_pct / 100.0)
-                            tot_usd = self._record_trade_event(tid, tr, "TRAILING_TP1_STOP", rem_gain_usd)
-                            demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TRAILING_TP1_STOP") if not self.dry_run else ""
-                            if not self.dry_run and self.notifier.is_configured:
-                                m_txt = format_tp_hit_message(
-                                    tr,
-                                    "TRAILING_TP1_STOP",
-                                    live_c.close,
-                                    event_pnl_usd=rem_gain_usd,
-                                    total_trade_pnl_usd=tot_usd,
-                                    current_bankroll=float(self.state["current_bankroll"]),
-                                )
-                                if demo_note:
-                                    m_txt += f"\n\n{demo_note}"
-                                self.notifier.send_message(m_txt)
-                        del tracked_trades[tid]
-                        continue
-
-                    # TP1 (0.0 seviyesi -> Pozisyonun %80'i kapanıp kâr kilitlenir, SL girişe çekilir)
-                    if "TP1" not in hits and (
-                        (direction == "LONG" and bar_high >= tp1_val)
-                        or (direction == "SHORT" and bar_low <= tp1_val)
-                    ):
-                        hits.append("TP1")
-                        tr["current_sl"] = level_0618
-                        tp1_pct = calc_pct_diff(level_0618, tp1_val)
-                        gain_tp1_usd = tp1_close_ratio * pos_usd * (tp1_pct / 100.0)
-                        tot_usd = self._record_trade_event(tid, tr, "TP1", gain_tp1_usd)
-                        demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP1") if not self.dry_run else ""
-                        if not self.dry_run and self.notifier.is_configured:
-                            m_txt = format_tp_hit_message(
-                                tr,
-                                "TP1",
-                                live_c.close,
-                                event_pnl_usd=gain_tp1_usd,
-                                total_trade_pnl_usd=tot_usd,
-                                current_bankroll=float(self.state["current_bankroll"]),
-                            )
-                            if demo_note:
-                                m_txt += f"\n\n{demo_note}"
-                            self.notifier.send_message(m_txt)
-                            print(f"[TELEGRAM GÖNDERİLDİ] TP1 Vuruldu -> {sym} ({direction}) (+{gain_tp1_usd:.2f}$)")
-
-                    # TP2 (-0.5 uzatma -> Kalanın yarısı [%10] daha kapanır, SL TP1'e çekilir)
-                    if "TP1" in hits and "TP2" not in hits and (
-                        (direction == "LONG" and bar_high >= tp2_val)
-                        or (direction == "SHORT" and bar_low <= tp2_val)
-                    ):
-                        hits.append("TP2")
-                        tr["current_sl"] = tp1_val
-                        tp2_pct = calc_pct_diff(level_0618, tp2_val)
-                        gain_tp2_usd = rem_half_ratio * pos_usd * (tp2_pct / 100.0)
-                        tot_usd = self._record_trade_event(tid, tr, "TP2", gain_tp2_usd)
-                        demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP2") if not self.dry_run else ""
-                        if not self.dry_run and self.notifier.is_configured:
-                            m_txt = format_tp_hit_message(
-                                tr,
-                                "TP2",
-                                live_c.close,
-                                event_pnl_usd=gain_tp2_usd,
-                                total_trade_pnl_usd=tot_usd,
-                                current_bankroll=float(self.state["current_bankroll"]),
-                            )
-                            if demo_note:
-                                m_txt += f"\n\n{demo_note}"
-                            self.notifier.send_message(m_txt)
-                            print(f"[TELEGRAM GÖNDERİLDİ] TP2 Vuruldu -> {sym} ({direction}) (+{gain_tp2_usd:.2f}$)")
-
-                    # TP3 (-1.0 tam uzatma -> Son %10 pozisyon kapanır)
-                    if "TP2" in hits and "TP3" not in hits and (
-                        (direction == "LONG" and bar_high >= tp3_val)
-                        or (direction == "SHORT" and bar_low <= tp3_val)
-                    ):
-                        hits.append("TP3")
-                        tp3_pct = calc_pct_diff(level_0618, tp3_val)
-                        gain_tp3_usd = rem_half_ratio * pos_usd * (tp3_pct / 100.0)
-                        tot_usd = self._record_trade_event(tid, tr, "TP3", gain_tp3_usd)
-                        demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP3") if not self.dry_run else ""
-                        if not self.dry_run and self.notifier.is_configured:
-                            m_txt = format_tp_hit_message(
-                                tr,
-                                "TP3",
-                                live_c.close,
-                                event_pnl_usd=gain_tp3_usd,
-                                total_trade_pnl_usd=tot_usd,
-                                current_bankroll=float(self.state["current_bankroll"]),
-                            )
-                            if demo_note:
-                                m_txt += f"\n\n{demo_note}"
-                            self.notifier.send_message(m_txt)
-                            print(f"[TELEGRAM GÖNDERİLDİ] TP3 Vuruldu -> {sym} ({direction}) (+{gain_tp3_usd:.2f}$)")
-                        del tracked_trades[tid]
-
-            # 2) Yeni kurulumları tara
+            # 2) Yeni Hacimli Kırılımları Tara
+            cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
             for symbol, (ticker, candles) in klines_map.items():
-                flip_info = flip_watch.get(symbol)
-                flipped_from = flip_info.get("stopped_dir") if flip_info else None
-
                 setup = analyze_symbol(
                     symbol=symbol,
                     candles=candles,
                     ticker=ticker,
-                    flipped_from_direction=flipped_from,
+                    bankroll_usd=cur_bank,
                 )
                 if setup is None:
                     continue
 
-                if setup.stage == "STOPPED_OUT":
-                    flip_watch[symbol] = {
-                        "stopped_dir": setup.direction,
-                        "ts": int(time.time() * 1000),
-                    }
-                    continue
-
                 current_active[symbol] = setup
                 already_sent = sent_alerts.get(setup.setup_id, [])
-                cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
-                rec_margin = round(cur_bank * (setup.recommended_bankroll_pct / 100.0), 2)
 
-                if (
-                    setup.stage == "STAGE_1_LIMIT_READY"
-                    and "STAGE_1" not in already_sent
-                    and "STAGE_2" not in already_sent
-                ):
-                    msg = format_setup_message(setup, "STAGE_1", current_bankroll=cur_bank)
+                if "BREAKOUT" not in already_sent:
+                    msg = format_setup_message(setup, current_bankroll=cur_bank)
                     if not self.dry_run:
-                        _, demo_note = self.demo_trader.place_setup_order(setup, "STAGE_1", cur_bank)
+                        _, demo_note = self.demo_trader.place_setup_order(setup, "BREAKOUT", cur_bank)
                         if demo_note:
                             msg += f"\n\n{demo_note}"
-                    if self.dry_run or not self.notifier.is_configured:
-                        print(
-                            f"\n[SİNYAL - AŞAMA 1] {setup.symbol} ({setup.direction} | {setup.quality_grade} %{setup.recommended_bankroll_pct}) "
-                            f"| Giriş(0.618): {fmt_price(setup.fib.level_0618)} | TP1: {fmt_price(setup.fib.level_0)}"
-                        )
-                    if not self.dry_run and self.notifier.is_configured:
-                        if self.notifier.send_message(msg):
-                            already_sent.append("STAGE_1")
-                            sent_alerts[setup.setup_id] = already_sent
-                            tracked_trades[setup.setup_id] = {
-                                "symbol": setup.symbol,
-                                "direction": setup.direction,
-                                "status": "WAITING_ZONE",
-                                "origin_ts": setup.origin_timestamp,
-                                "bos_ts": setup.bos_timestamp,
-                                "extreme_ts": setup.extreme_timestamp,
-                                "broken_price": setup.broken_structure_price,
-                                "level_1": setup.fib.level_1,
-                                "entry_0618": setup.fib.level_0618,
-                                "level_0500": setup.fib.level_0500,
-                                "initial_sl": setup.fib.stop_loss,
-                                "current_sl": setup.fib.stop_loss,
-                                "tp1": setup.fib.level_0,
-                                "tp2": setup.fib.level_neg_05,
-                                "tp3": setup.fib.level_neg_10,
-                                "rrr_tp1": setup.rrr_at_0618,
-                                "rrr_tp2": setup.rrr_tp2,
-                                "rrr_tp3": setup.rrr_tp3,
-                                "rvol": setup.rvol,
-                                "atr_mult": setup.impulse_atr_mult,
-                                "strength_score": setup.strength_score,
-                                "quality_grade": setup.quality_grade,
-                                "bankroll_pct": setup.recommended_bankroll_pct,
-                                "margin_usd": rec_margin,
-                                "confluence_notes": setup.confluence_notes or [],
-                                "realized_usd": 0.0,
-                                "hits": [],
-                                "ts": int(time.time() * 1000),
-                            }
-                            stage1_sent += 1
-                            print(f"[TELEGRAM GÖNDERİLDİ] Aşama 1 -> {setup.symbol} ({setup.direction} | {setup.quality_grade})")
 
-                elif setup.stage == "STAGE_2_GOLDEN_ZONE" and "STAGE_2" not in already_sent:
-                    msg = format_setup_message(setup, "STAGE_2", current_bankroll=cur_bank)
-                    if not self.dry_run:
-                        _, demo_note = self.demo_trader.place_setup_order(setup, "STAGE_2", cur_bank)
-                        if demo_note:
-                            msg += f"\n\n{demo_note}"
                     if self.dry_run or not self.notifier.is_configured:
                         print(
-                            f"\n[SİNYAL - AŞAMA 2 ALTIN BÖLGE] {setup.symbol} ({setup.direction} | {setup.quality_grade} %{setup.recommended_bankroll_pct}) "
-                            f"| Anlık: {fmt_price(setup.current_price)} | 0.618: {fmt_price(setup.fib.level_0618)}"
+                            f"\n[SİNYAL - BREAKOUT] {setup.symbol} ({setup.direction} | {setup.quality_grade}) "
+                            f"| Giriş: {fmt_price(setup.entry_price)} | RVOL: {setup.rvol}x | TP1: {fmt_price(setup.tp1_price)}"
                         )
+
                     if not self.dry_run and self.notifier.is_configured:
                         if self.notifier.send_message(msg):
-                            already_sent.append("STAGE_2")
+                            already_sent.append("BREAKOUT")
                             sent_alerts[setup.setup_id] = already_sent
                             tracked_trades[setup.setup_id] = {
                                 "symbol": setup.symbol,
                                 "direction": setup.direction,
                                 "status": "IN_TRADE",
-                                "origin_ts": setup.origin_timestamp,
-                                "bos_ts": setup.bos_timestamp,
-                                "extreme_ts": setup.extreme_timestamp,
-                                "zone_entry_ts": candles[-2].timestamp if len(candles) >= 2 else setup.extreme_timestamp,
-                                "broken_price": setup.broken_structure_price,
-                                "level_1": setup.fib.level_1,
-                                "entry_0618": setup.fib.level_0618,
-                                "level_0500": setup.fib.level_0500,
-                                "initial_sl": setup.fib.stop_loss,
-                                "current_sl": setup.fib.stop_loss,
-                                "tp1": setup.fib.level_0,
-                                "tp2": setup.fib.level_neg_05,
-                                "tp3": setup.fib.level_neg_10,
-                                "rrr_tp1": setup.rrr_at_0618,
+                                "entry_price": setup.entry_price,
+                                "breakout_level": setup.breakout_level,
+                                "tp1_price": setup.tp1_price,
+                                "tp2_price": setup.tp2_price,
+                                "initial_sl": setup.sl_price,
+                                "current_sl": setup.sl_price,
+                                "tp1_pct": setup.tp1_pct,
+                                "tp2_pct": setup.tp2_pct,
+                                "sl_pct": setup.sl_pct,
+                                "rrr_tp1": setup.rrr_tp1,
                                 "rrr_tp2": setup.rrr_tp2,
-                                "rrr_tp3": setup.rrr_tp3,
                                 "rvol": setup.rvol,
-                                "atr_mult": setup.impulse_atr_mult,
                                 "strength_score": setup.strength_score,
                                 "quality_grade": setup.quality_grade,
-                                "bankroll_pct": setup.recommended_bankroll_pct,
-                                "margin_usd": rec_margin,
-                                "confluence_notes": setup.confluence_notes or [],
-                                "realized_usd": 0.0,
+                                "margin_usd": setup.recommended_margin_usd,
+                                "entry_ts": candles[-2].timestamp if len(candles) >= 2 else int(time.time() * 1000),
                                 "hits": [],
+                                "realized_usd": 0.0,
+                                "notes": setup.notes,
                                 "ts": int(time.time() * 1000),
                             }
-                            stage2_sent += 1
-                            print(f"[TELEGRAM GÖNDERİLDİ] Aşama 2 -> {setup.symbol} ({setup.direction} | {setup.quality_grade})")
+                            breakout_sent += 1
+                            print(f"[TELEGRAM GÖNDERİLDİ] Hacim Kırılımı -> {setup.symbol} ({setup.direction} | {setup.rvol}x RVOL)")
 
             self.active_setups = current_active
             self.scan_count += 1
             self.last_scanned_symbols_count = len(klines_map)
-            now_tr = datetime.now(TR_TZ).strftime("%d.%m.%Y %H:%M:%S")
-            self.last_scan_time_str = now_tr
+            now_tr_str = datetime.now(TR_TZ).strftime("%d.%m.%Y %H:%M:%S")
+            self.last_scan_time_str = now_tr_str
             elapsed = time.time() - start_t
 
-            # Tarama sonunda Bybit gerçek bakiyesini tekrar güncelle ve saatlik/günlük raporları kontrol et
             if not self.dry_run:
                 self.sync_real_bybit_balance_and_pnl()
             self.check_and_send_scheduled_reports()
@@ -783,45 +478,43 @@ class ScannerEngine:
             if not self.dry_run:
                 self._save_state()
 
-            s1_total = sum(1 for s in current_active.values() if s.stage == "STAGE_1_LIMIT_READY")
-            s2_total = sum(1 for s in current_active.values() if s.stage == "STAGE_2_GOLDEN_ZONE")
+            open_count = len(tracked_trades)
             print(
-                f"[{now_tr}] Tarama #{self.scan_count} tamamlandı ({elapsed:.1f}s) | "
-                f"Parite: {len(klines_map)} | Aktif Pusu (Aşama 1): {s1_total} | "
-                f"Altın Bölgede (Aşama 2): {s2_total} | Gerçek Kasa: {self.state.get('current_bankroll', 100.0):.2f}$"
+                f"[{now_tr_str}] Tarama #{self.scan_count} tamamlandı ({elapsed:.1f}s) | "
+                f"Parite: {len(klines_map)} | Aktif Kırılım: {len(current_active)} | "
+                f"Açık İşlem: {open_count} | Gerçek Kasa: {self.state.get('current_bankroll', 100.0):.2f}$"
             )
             return {
                 "scanned": len(klines_map),
-                "active_stage1": s1_total,
-                "active_stage2": s2_total,
-                "sent_stage1": stage1_sent,
-                "sent_stage2": stage2_sent,
+                "active_breakouts": len(current_active),
+                "sent_breakouts": breakout_sent,
+                "open_trades": open_count,
                 "current_bankroll": float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD)),
             }
 
     def format_status_text(self) -> str:
         if not self.dry_run:
             self.sync_real_bybit_balance_and_pnl()
-        s1 = sum(1 for s in self.active_setups.values() if s.stage == "STAGE_1_LIMIT_READY")
-        s2 = sum(1 for s in self.active_setups.values() if s.stage == "STAGE_2_GOLDEN_ZONE")
         cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
         wb_val = float(self.state.get("wallet_balance", cur_bank))
         upnl_val = float(self.state.get("unrealised_pnl", 0.0))
         start_bank = float(self.state.get("day_start_bankroll", Config.DEFAULT_BANKROLL_USD))
         diff = cur_bank - start_bank
+        tracked = self.state.get("tracked_trades", {})
+        open_cnt = len(tracked)
+
         return (
             f"📊 <b>TARAYICI VE GERÇEK KASA DURUM RAPORU</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ <b>Durum:</b> Aktif Çalışıyor (15dk Mumlar + SMC/ICT Puanlama)\n"
-            f"🏦 <b>Borsa:</b> Bybit USDT Vadeli (Canlı Senkronize)\n"
+            f"🚀 <b>Strateji:</b> Hacim Patlaması & Kırılım (Breakout Sniper | 15dk)\n"
+            f"🏦 <b>Borsa:</b> Bybit USDT Vadeli (Demo Canlı Senkronize)\n"
             f"🔢 <b>Taranan Parite:</b> {self.last_scanned_symbols_count} yüksek hacimli coin\n"
             f"🔄 <b>Toplam Tarama:</b> {self.scan_count}\n"
             f"🕒 <b>Son Tarama (TSİ):</b> <code>{self.last_scan_time_str}</code>\n"
-            f"🎯 <b>Pusudaki Kurulumlar (Aşama 1):</b> {s1}\n"
-            f"🔥 <b>Altın Bölgedekiler (Aşama 2):</b> {s2}\n\n"
+            f"📈 <b>Açık / Takip Edilen İşlem:</b> <b>{open_cnt} adet</b>\n\n"
             f"💰 <b>Bybit Net Kasa (Equity):</b> <b><code>{cur_bank:.2f}$</code></b> (Bugün: <code>{fmt_usd_signed(diff)}</code>)\n"
             f"🏦 <b>Cüzdan Bakiyesi:</b> <code>{wb_val:.2f}$</code> | <b>Açık PnL:</b> <code>{fmt_usd_signed(upnl_val)}</code>\n"
-            f"📌 <i>Saatlik ve günlük detaylı TP/SL tablosu için /rapor yazabilirsin.</i>"
+            f"📌 <i>Detaylı bilanço için /rapor veya /demo yazabilirsin.</i>"
         )
 
     def format_live_report_text(self) -> str:
@@ -834,16 +527,14 @@ class ScannerEngine:
         hour_events = [e for e in daily_events if int(e.get("ts", 0)) >= one_hour_ago_ms]
 
         tracked = self.state.get("tracked_trades", {})
-        in_trade_cnt = sum(1 for t in tracked.values() if t.get("status") == "IN_TRADE")
-        waiting_cnt = sum(1 for t in tracked.values() if t.get("status") == "WAITING_ZONE")
+        in_trade_cnt = len(tracked)
 
         return format_hourly_report_message(
             window_label=f"Son 1 Saat — {now_tr.strftime('%H:%M')}",
             day_label=now_tr.strftime("%d.%m.%Y"),
             hour_events=hour_events,
             daily_events=daily_events,
-            active_in_trade_count=in_trade_cnt,
-            active_waiting_count=waiting_cnt,
+            active_trades_count=in_trade_cnt,
             day_start_bankroll=float(self.state.get("day_start_bankroll", Config.DEFAULT_BANKROLL_USD)),
             current_bankroll=float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD)),
             is_manual=True,
@@ -852,24 +543,17 @@ class ScannerEngine:
     def format_active_setups_text(self) -> str:
         if not self.active_setups:
             return (
-                "📭 Şu anda kuralların tamamını karşılayan aktif bir Aşama 1 veya Aşama 2 "
-                "Fibonacci kurulumu bulunmuyor. Tarama kesintisiz devam ediyor."
+                "📭 Şu anda kuralların tamamını (20-Mum Kırılımı + Güçlü Gövde + 1.8x RVOL) karşılayan yeni bir "
+                "kırılım sinyali bulunmuyor. Tarama kesintisiz devam ediyor."
             )
 
-        lines = ["📌 <b>AKTİF FİBONACCİ + SMC KURULUMLARI (15dk)</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
-        sorted_setups = sorted(
-            self.active_setups.values(),
-            key=lambda s: (0 if s.stage == "STAGE_2_GOLDEN_ZONE" else 1, -s.strength_score, -s.turnover_24h),
-        )
-        for s in sorted_setups[:20]:
-            badge = "🔥 AŞAMA 2 (ALTIN BÖLGE)" if s.stage == "STAGE_2_GOLDEN_ZONE" else "🎯 AŞAMA 1 (LİMİT PUSU)"
+        lines = ["🚀 <b>GÜNCEL HACİMLİ KIRILIM SİNYALLERİ (15dk)</b>\n━━━━━━━━━━━━━━━━━━━━━━"]
+        for s in list(self.active_setups.values())[:15]:
             d_icon = "🟢 LONG" if s.direction == "LONG" else "🔴 SHORT"
             lines.append(
-                f"{badge} | <b>#{s.symbol}</b> ({d_icon}) — <b>{s.quality_grade} ({s.strength_score}p | Kasa %{s.recommended_bankroll_pct})</b>\n"
-                f"   Fiyat: <code>{fmt_price(s.current_price)}</code> | "
-                f"0.618: <code>{fmt_price(s.fib.level_0618)}</code> | "
-                f"TP1: <code>{fmt_price(s.fib.level_0)}</code> | "
-                f"SL: <code>{fmt_price(s.fib.stop_loss)}</code>"
+                f"• <b>#{s.symbol}</b> ({d_icon}) — <b>{s.rvol}x RVOL ({s.quality_grade})</b>\n"
+                f"  Kırılan: <code>{fmt_price(s.breakout_level)}</code> | Giriş: <code>{fmt_price(s.entry_price)}</code>\n"
+                f"  TP1: <code>{fmt_price(s.tp1_price)}</code> | TP2: <code>{fmt_price(s.tp2_price)}</code> | SL: <code>{fmt_price(s.sl_price)}</code>"
             )
         return "\n\n".join(lines)
 
@@ -878,11 +562,11 @@ class ScannerEngine:
         return (
             f"✅ <b>Tarama Tamamlandı!</b>\n"
             f"• İncelenen Parite: <b>{stats['scanned']}</b>\n"
-            f"• Pusuda Bekleyen (Aşama 1): <b>{stats['active_stage1']}</b>\n"
-            f"• Altın Bölgede Olan (Aşama 2): <b>{stats['active_stage2']}</b>\n"
-            f"• Yeni Gönderilen Sinyal: <b>{stats['sent_stage1'] + stats['sent_stage2']}</b>\n"
+            f"• Aktif Kırılım: <b>{stats['active_breakouts']}</b>\n"
+            f"• Açık İşlem Sayısı: <b>{stats['open_trades']}</b>\n"
+            f"• Yeni Açılan İşlem: <b>{stats['sent_breakouts']}</b>\n"
             f"• Güncel Kasa: <b><code>{stats['current_bankroll']:.2f}$</code></b>\n\n"
-            f"Detaylar için /aktif, /demo veya /rapor yazabilirsin."
+            f"Detaylar için /demo veya /rapor yazabilirsin."
         )
 
     def format_demo_text(self) -> str:
@@ -909,23 +593,19 @@ class ScannerEngine:
             f"• 🧹 <b>Kapatılan Açık Pozisyon:</b> <code>{closed_pos} adet</code>\n"
             f"• 🗑 <b>İptal Edilen Bekleyen Emir:</b> <code>{cancelled_ords} adet</code>\n"
             f"• 🏦 <b>Yeni Gerçek Bybit Demo Bakiyesi:</b> <b><code>{real_wb:.2f}$</code></b>\n"
-            f"• 🛡 <b>Sabit Risk Koruması:</b> Stop olursa maks. <code>-{real_wb * 0.02:.2f}$</code> (%2) risk\n"
-            f"• 🎯 <b>TP1 (%80 Kâr Kilidi):</b> TP1 vurulduğunda pozisyonun %80'i cebe kilitlenir!"
+            f"• ⚡ <b>Kaldıraç & Marjin:</b> 15x İzole (İşlem başı %20 = ~20$ marjin)\n"
+            f"• 🎯 <b>TP1 (%75 Kâr Kilidi):</b> TP1 vurulduğunda %75 kâr cebe kilitlenir, SL Girişe çekilir!"
         )
 
     def toggle_demo_auto_text(self, enable: bool) -> str:
         self.demo_trader.enabled = enable
         if enable:
-            return "🟢 <b>Bybit Demo Otomatik Al-Sat AKTİF edildi!</b> Gelen sinyallerde otomatik emir açılacak."
-        return "⏸ <b>Bybit Demo Otomatik Al-Sat DURAKLATILDI!</b> Sadece Telegram sinyali ve sanal rapor gönderilecek."
+            return "🟢 <b>Bybit Demo Otomatik Al-Sat AKTİF edildi!</b> Hacimli kırılımlarda otomatik işlem açılacak."
+        return "⏸ <b>Bybit Demo Otomatik Al-Sat DURAKLATILDI!</b>"
 
 
 def start_health_http_server(engine: ScannerEngine, port: int) -> None:
-    """
-    Ücretsiz bulut servislerinde (Render Frankfurt + cron-job.org) botun 7/24 uyanık kalması
-    ve dışarıdan /health veya /scan ile tetiklenebilmesi için ultra hafif yerleşik HTTP sunucusu.
-    """
-
+    """Render ve cron-job.org için 7/24 uyanık tutma ve sağlık sunucusu."""
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path.startswith("/scan"):
@@ -939,10 +619,10 @@ def start_health_http_server(engine: ScannerEngine, port: int) -> None:
                 body = json.dumps(
                     {
                         "ok": True,
-                        "service": "bybit-15m-fibonacci-scanner",
+                        "service": "bybit-15m-breakout-sniper",
                         "scan_count": engine.scan_count,
                         "last_scan": engine.last_scan_time_str,
-                        "active_setups": len(engine.active_setups),
+                        "open_trades": len(engine.state.get("tracked_trades", {})),
                         "current_bankroll": float(engine.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD)),
                     },
                     ensure_ascii=False,
@@ -958,17 +638,17 @@ def start_health_http_server(engine: ScannerEngine, port: int) -> None:
     server = HTTPServer(("0.0.0.0", port), Handler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
-    print(f"[SUNUCU] 7/24 Bulut Uyumlu Sağlık/Tetikleme Sunucusu aktif -> Port {port} (/health, /scan)")
+    print(f"[SUNUCU] 7/24 Bulut Sağlık Sunucusu aktif -> Port {port} (/health, /scan)")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Bybit 15m Fibonacci Golden Zone Scanner")
+    parser = argparse.ArgumentParser(description="Bybit 15m Breakout Sniper Scanner")
     parser.add_argument("--once", action="store_true", help="Sadece 1 kez tarama yap ve çık")
-    parser.add_argument("--dry-run", action="store_true", help="Telegram mesajı göndermeden konsolda test et")
+    parser.add_argument("--dry-run", action="store_true", help="Telegram göndermeden test et")
     args = parser.parse_args()
 
     print("=" * 72)
-    print("  BYBIT 15DK FİBONACCİ + SMC/ICT KASA YÖNETİMLİ TARAYICI")
+    print("  BYBIT 15DK HACİM PATLAMASI & ZİRVE KIRILIMI (BREAKOUT SNIPER)")
     print("=" * 72)
 
     engine = ScannerEngine(dry_run=args.dry_run)
@@ -980,7 +660,6 @@ def main() -> None:
         if not args.dry_run and engine.notifier.is_configured:
             engine.notifier.poll_commands(
                 get_status_cb=engine.format_status_text,
-                get_active_cb=engine.format_active_setups_text,
                 trigger_scan_cb=engine.trigger_manual_scan_text,
                 get_report_cb=engine.format_live_report_text,
                 get_demo_cb=engine.format_demo_text,
@@ -989,43 +668,24 @@ def main() -> None:
             )
             engine.state["last_update_id"] = engine.notifier._last_update_id
             engine._save_state()
-        print(
-            "\n"
-            + engine.format_active_setups_text()
-            .replace("<b>", "")
-            .replace("</b>", "")
-            .replace("<code>", "")
-            .replace("</code>", "")
-        )
         return
 
-    if not engine.notifier.token:
-        print(
-            "\n[BİLGİ] Henüz TELEGRAM_BOT_TOKEN ayarlanmamış!\n"
-            "Lütfen '1_KURULUM_SIHIRBAZI.bat' dosyasını çalıştırarak 1 dakikada botunu bağla.\n"
-        )
-    elif not engine.notifier.chat_id:
-        engine.notifier.register_bot_commands()
-        print(
-            "\n[BİLGİ] Bot Token yüklü! Telegram'dan botuna '/start' yazdığın an "
-            "Chat ID'n otomatik algılanacak ve bildirimler başlayacak!\n"
-        )
-    else:
+    if engine.notifier.token and engine.notifier.chat_id:
         engine.notifier.register_bot_commands()
         cleared = engine.demo_trader.cancel_all_open_orders() if not args.dry_run else 0
         engine.notifier.send_message(
-            "🟢 <b>Bybit 15dk Fibonacci + 25x Kaldıraçlı Kasa Yönetimi Aktif!</b>\n"
+            "🚀 <b>Hacim Patlaması & Zirve Kırılımı (Breakout Sniper) Botu Aktif!</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
-            "✨ <b>Yeni Kaldıraç ve Kasa Optimizasyonu:</b>\n"
-            "  • ⚡ <b>Kaldıraç:</b> <code>25x İzole</code> (Aynı yüksek $ kârı, 2.5 kat daha az teminat bağlama!)\n"
-            "  • 💼 <b>Giriş Oranları (100$ Kasa):</b>\n"
-            "     🔥 <b>A+ Kalite:</b> <code>%8 Marjin (8$ ➡️ 200$ Pozisyon)</code>\n"
-            "     ⚡ <b>A Kalite:</b> <code>%6 Marjin (6$ ➡️ 150$ Pozisyon)</code>\n"
-            "     ⚖️ <b>B Kalite:</b> <code>%4 Marjin (4$ ➡️ 100$ Pozisyon)</code>\n"
-            "  • 🛡 <b>Teminat Kilitleme Koruması:</b> Uzaktaki Aşama 1 kurulumlarına limit emir dizip bakiyeyi kilitlemez; "
-            "sadece fiyat <code>0.500 – 0.618</code> Altın Bölgeye girdiğinde pozisyon açar!\n"
-            f"  • 🧹 Teminatı kilitleyen eski bekleyen limit emirler temizlendi (<code>{cleared} adet</code>).\n"
-            "  • 📊 Canlı durum için: /demo ve /rapor"
+            "✨ <b>Yeni Strateji Özellikleri:</b>\n"
+            "  • ⚡ <b>Zaman Dilimi:</b> <code>15 Dakika (Donchian 20-Mum Kırılımı)</code>\n"
+            "  • 💥 <b>Filtre:</b> En az <code>1.8x RVOL</code> kurumsal hacim patlaması + Güçlü mum gövdesi\n"
+            "  • 💼 <b>İşlem Başı Marjin:</b> Kasanın <code>%20'si</code> (100$ kasa için <code>20$</code> marjin)\n"
+            "  • ⚡ <b>Kaldıraç:</b> <code>15x İzole</code> (Komisyonu ezen saf kâr odaklı)\n"
+            "  • 🎯 <b>TP1 (1.6x ATR):</b> %75 pozisyon kârla kapanır, Stop Giriş Seviyesine (Başabaş) çekilir!\n"
+            "  • 🚀 <b>TP2 (2.8x ATR):</b> Kalan %25 pozisyon tam trend kazancıyla kapatılır!\n"
+            "  • 🛡 <b>Açık İşlem Sınırı:</b> Fırsat geldikçe bakiye yettiğince eşzamanlı işlem açabilir.\n"
+            f"  • 🧹 Eski bekleyen limit emirler temizlendi (<code>{cleared} adet</code>).\n"
+            "  • 📊 Durum için: /durum, /demo veya /rapor yazabilirsin."
         )
 
     start_health_http_server(engine, Config.PORT)
@@ -1041,7 +701,6 @@ def main() -> None:
             prev_upd_id = engine.notifier._last_update_id
             engine.notifier.poll_commands(
                 get_status_cb=engine.format_status_text,
-                get_active_cb=engine.format_active_setups_text,
                 trigger_scan_cb=engine.trigger_manual_scan_text,
                 get_report_cb=engine.format_live_report_text,
                 get_demo_cb=engine.format_demo_text,
@@ -1054,7 +713,7 @@ def main() -> None:
 
             time.sleep(2)
         except KeyboardInterrupt:
-            print("\n[ÇIKIŞ] Tarayıcı kullanıcı tarafından durduruldu.")
+            print("\n[ÇIKIŞ] Tarayıcı durduruldu.")
             break
         except Exception as exc:
             print(f"[HATA] Döngü hatası (5 sn sonra devam edecek): {exc}")

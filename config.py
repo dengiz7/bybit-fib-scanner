@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-The Moving Average (Arty) - 15 Dakikalık Fibonacci Retracement Stratejisi Konfigürasyonu
-Videodaki tüm kuralların birebir (harfi harfine) parametrik karşılıkları.
+Hacim Patlaması ve Zirve Kırılımı (RVOL Breakout Sniper) Konfigürasyonu
 """
 
 import os
@@ -13,7 +12,6 @@ STATE_PATH = BASE_DIR / "state.json"
 
 
 def load_env_file(env_path: Path = ENV_PATH) -> None:
-    """Harici kütüphane gerektirmeden .env dosyasını okur ve ortam değişkenlerine yükler."""
     if not env_path.exists():
         return
     try:
@@ -31,7 +29,6 @@ def load_env_file(env_path: Path = ENV_PATH) -> None:
 
 
 def save_env_value(key: str, value: str, env_path: Path = ENV_PATH) -> None:
-    """Belirtilen anahtar-değer çiftini .env dosyasına kaydeder veya günceller."""
     os.environ[key] = str(value)
     lines = []
     found = False
@@ -58,74 +55,34 @@ class Config:
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-    # --- Borsa ve Tarama Ayarları (Bybit USDT Perpetual) ---
-    TIMEFRAME: str = os.getenv("TIMEFRAME", "15")  # 15 dakikalık mumlar
-    TOP_SYMBOLS_COUNT: int = int(os.getenv("TOP_SYMBOLS_COUNT", "75"))  # En yüksek hacimli ilk 75 USDT paritesi
-    MIN_24H_TURNOVER_USD: float = float(os.getenv("MIN_24H_TURNOVER_USD", "5000000"))  # Min 5M$ 24s hacim
-    KLINE_LIMIT: int = 200  # Yapı ve ATR hesabı için çekilecek mum sayısı
+    # --- Borsa ve Tarama Ayarları (Bybit USDT Linear Perpetual) ---
+    TIMEFRAME: str = os.getenv("TIMEFRAME", "15")  # 15 dakikalık mumlar (Hızlı hacim kırılımları)
+    TOP_SYMBOLS_COUNT: int = int(os.getenv("TOP_SYMBOLS_COUNT", "65"))  # En yüksek hacimli ilk 65 USDT paritesi
+    MIN_24H_TURNOVER_USD: float = float(os.getenv("MIN_24H_TURNOVER_USD", "8000000"))  # Min 8M$ 24s hacim (Likidite şartı)
+    KLINE_LIMIT: int = 200  # Çekilecek mum sayısı
     SCAN_INTERVAL_SECONDS: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))  # Tarama döngü süresi (sn)
 
-    # --- Aktif Strateji Motoru Seçimi ---
-    # "SNIPER" = %82-%85 Win Rate Kuantum Sniper (Bollinger + RSI7 Tükeniş + Likidite Süpürmesi + Trend Pullback)
-    # "FIBONACCI" = Eski Arty 15dk Fibonacci + SMC/ICT Sistemi (İstediğin an /mod fib ile dönebilirsin)
-    STRATEGY_MODE: str = os.getenv("STRATEGY_MODE", "SNIPER").strip().upper()
+    # --- Hacim Patlaması & Kırılım (Breakout Sniper) Parametreleri ---
+    BREAKOUT_LOOKBACK: int = int(os.getenv("BREAKOUT_LOOKBACK", "20"))  # Son 20 mumun (5 saat) tavanı / tabanı
+    MIN_RVOL: float = float(os.getenv("MIN_RVOL", "1.80"))  # Kırılım mumu en az 1.8x ortalama hacimde olmalı
+    MIN_BODY_RATIO: float = float(os.getenv("MIN_BODY_RATIO", "0.45"))  # Kırılım mumunun gövdesi mum boyunun en az %45'i olmalı
+    MIN_TP1_MOVE_PCT: float = float(os.getenv("MIN_TP1_MOVE_PCT", "1.40"))  # Komisyonu ezen min %1.40 saf fiyat hareketi
+    TP1_ATR_MULT: float = float(os.getenv("TP1_ATR_MULT", "1.60"))  # TP1: 1.6x ATR
+    TP2_ATR_MULT: float = float(os.getenv("TP2_ATR_MULT", "2.80"))  # TP2: 2.8x ATR
+    SL_ATR_MULT: float = float(os.getenv("SL_ATR_MULT", "1.15"))   # SL: Kırılan seviyenin 1.15x ATR arkası
+    TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "0.75"))  # TP1'de pozisyonun %75'ini kapat, SL'yi girişe çek!
 
-    # --- Piyasa Yapısı (Market Structure) & BoS Ayarları ---
-    # Video 1 [03:14]: Fitiller (wicks) piyasa yapısına dahildir.
-    # 4 Sol / 2 Sağ mum ana yapı filtresi: Gece saatlerindeki 3 mumluk mikro-gürültü tuzaklarını eler!
-    PIVOT_LEFT_BARS: int = int(os.getenv("PIVOT_LEFT_BARS", "4"))
-    PIVOT_RIGHT_BARS: int = int(os.getenv("PIVOT_RIGHT_BARS", "2"))
-    MAX_BOS_AGE_CANDLES: int = int(os.getenv("MAX_BOS_AGE_CANDLES", "14"))  # Son 14 mum (3.5 saat) içindeki taze BoS'lar
-
-    # --- Kasa Büyütme: Minimum Kâr Mesafesi Filtresi (0.618 -> 0.0 TP1 arası saf fiyat yüzdesi) ---
-    # Cılız %0.2-%0.4 dalgaları eler; TP1'de en az %0.85 (TP2'de ~%1.55, TP3'te ~%2.25+) potansiyel şart koşar.
-    MIN_TP1_PCT: float = float(os.getenv("MIN_TP1_PCT", "0.85"))
-    MIN_TP1_PCT_MAJORS: float = float(os.getenv("MIN_TP1_PCT_MAJORS", "0.55"))  # BTC, ETH, SOL, XRP, BNB için alt sınır
-
-    # --- Kasa Yönetimi ve Sabit Risk Bazlı Pozisyon Büyüklüğü (100$ Baz Kasa & 25x İzole Kaldıraç) ---
+    # --- Kasa Yönetimi ve Pozisyon Büyüklüğü (100$ Kasa & 15x İzole Kaldıraç) ---
     DEFAULT_BANKROLL_USD: float = float(os.getenv("DEFAULT_BANKROLL_USD", "100.0"))
-    DEFAULT_LEVERAGE: int = int(os.getenv("DEFAULT_LEVERAGE", "25"))
-    MAX_RISK_PCT_PER_TRADE: float = float(os.getenv("MAX_RISK_PCT_PER_TRADE", "2.0"))  # Stop olursa maks. kasanın %2'si (~2$) risk edilir
-    TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "0.80"))  # TP1'de pozisyonun %80'ini kapatıp kârı cebe kilitle!
+    DEFAULT_LEVERAGE: int = int(os.getenv("DEFAULT_LEVERAGE", "15"))
+    MARGIN_PER_TRADE_PCT: float = float(os.getenv("MARGIN_PER_TRADE_PCT", "20.0"))  # Her işleme kasanın %20'si (20$ marjin -> 300$ pozisyon)
+    MAX_CONCURRENT_DEMO_TRADES: int = int(os.getenv("MAX_CONCURRENT_DEMO_TRADES", "0"))  # 0 = Sınırsız (Bakiye el verdikçe fırsatlara girer)
 
-    # --- Bybit V5 Demo Trading Otomatik Al-Sat Ayarları (%100 Ücretsiz Sanal Bakiye) ---
+    # --- Bybit V5 Demo Trading Otomatik Al-Sat Ayarları ---
     BYBIT_DEMO_API_KEY: str = os.getenv("BYBIT_DEMO_API_KEY", "").strip()
     BYBIT_DEMO_API_SECRET: str = os.getenv("BYBIT_DEMO_API_SECRET", "").strip()
     BYBIT_DEMO_BASE_URL: str = os.getenv("BYBIT_DEMO_BASE_URL", "https://api-demo.bybit.com").strip()
     DEMO_AUTO_TRADE_ENABLED: bool = os.getenv("DEMO_AUTO_TRADE_ENABLED", "true").lower() in ("1", "true", "yes", "on")
-    MAX_CONCURRENT_DEMO_TRADES: int = int(os.getenv("MAX_CONCURRENT_DEMO_TRADES", "0"))  # 0 = Sınırsız (Bakiye el verdiğince açar)
-
-    # --- Videodaki 6 Özel Fibonacci Seviyesi (Video 1 [03:52] & Video 2 [06:01]) ---
-    FIB_LEVEL_1: float = 1.000       # İtkisel hareketin başlangıcı (Stop-Loss referansı)
-    FIB_LEVEL_0618: float = 0.618    # Altın Cep (Golden Pocket) - Ana Limit Emir Giriş Seviyesi
-    FIB_LEVEL_0500: float = 0.500    # Altın Bölge (Golden Zone) Sınırı
-    FIB_LEVEL_0: float = 0.000       # İtkisel hareketin sonu - Ana Güvenli Take-Profit (Önceki Tepe/Dip)
-    FIB_LEVEL_NEG_05: float = -0.500 # 1. Uzatma (Extension) - Trailing SL hedefi
-    FIB_LEVEL_NEG_10: float = -1.000 # 2. Uzatma (Extension) - Trailing SL hedefi
-
-    # --- Stop-Loss Buffer ("just above/below the 1 level" - Video 1 [04:38, 05:45]) ---
-    # 1.05 SL buffer ile 02:45 tipi likidite avı fitillerine (stop-hunt) yakalanmayı önler!
-    SL_BUFFER_RATIO: float = float(os.getenv("SL_BUFFER_RATIO", "0.05"))
-
-    # --- Geri Çekilme & Aşama Eşikleri (Video 1 [03:35]) ---
-    # "watch this move play out until the price starts retracing heavily"
-    MIN_RETRACEMENT_STAGE1: float = float(os.getenv("MIN_RETRACEMENT_STAGE1", "0.20"))  # Aşama 1 bildirimi için min %20 geri çekilme
-    GOLDEN_ZONE_MIN: float = 0.580   # Aşama 2 Gerçek Altın Cep (0.580 - 0.618) başlangıcı (0.50 erken giriş RRR kaybını önler)
-    GOLDEN_ZONE_MAX: float = 0.786   # 0.618 etrafındaki aktif giriş bandı üst sınırı (1.0 SL'ye kadar geçerli)
-
-    # --- Fibonacci'nin Başarısız Olduğu 3 Senaryo İçin Zorunlu Filtreler (Video 1 [01:43-02:46]) ---
-    # 1) Yatay / Testere Piyasa (Choppy Range) Filtresi:
-    ATR_PERIOD: int = 20
-    MIN_IMPULSE_ATR_MULT: float = float(os.getenv("MIN_IMPULSE_ATR_MULT", "1.60"))  # İtkisel dalga boyu >= 1.6x ATR olmalı
-    MIN_IMPULSE_EFFICIENCY: float = float(os.getenv("MIN_IMPULSE_EFFICIENCY", "0.38"))  # Net mesafe / toplam mum boyları >= 0.38
-
-    # 2) Haber / Anormal Devasa Mum (Monster Spike Candle) Filtresi (Video 1 [02:15, 05:03]):
-    MAX_SINGLE_CANDLE_ATR_MULT: float = float(os.getenv("MAX_SINGLE_CANDLE_ATR_MULT", "4.0"))  # Tek mum > 4x ATR ise haber/manipülasyon mumu say ve ele
-
-    # 3) Düşük Hacim (Low Volume) Filtresi (Video 1 [02:25]):
-    VOLUME_SMA_PERIOD: int = 20
-    MIN_IMPULSE_MAX_RVOL: float = float(os.getenv("MIN_IMPULSE_MAX_RVOL", "1.05"))  # İtkisel dalgadaki en hacimli mum >= 1.05x ort. hacim
-    MIN_IMPULSE_AVG_RVOL: float = float(os.getenv("MIN_IMPULSE_AVG_RVOL", "0.85"))  # Veya dalga ortalaması >= 0.85x
 
     # --- Bulut (Render / Cron) HTTP Sunucu Ayarı ---
     PORT: int = int(os.getenv("PORT", "8080"))

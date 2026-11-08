@@ -487,12 +487,13 @@ class BybitDemoTrader:
         res = self._request("POST", "/v5/order/create", order_params, signed=True)
         if res.get("retCode") == 0:
             est_sl_usd = notional_usd * sl_dist_ratio
+            type_lbl = "Kuantum Sniper Girişi" if Config.STRATEGY_MODE == "SNIPER" else "0.618 Altın Cep Girişi"
             return (
                 True,
                 f"🤖 <b>BYBIT DEMO OTOMATİK POZİSYON + TP/SL AÇILDI!</b>\n"
-                f"  • <b>Tür:</b> <code>0.618 Altın Cep Girişi ({side})</code> | <b>Miktar:</b> <code>{qty_str}</code>\n"
+                f"  • <b>Tür:</b> <code>{type_lbl} ({side})</code> | <b>Miktar:</b> <code>{qty_str}</code>\n"
                 f"  • <b>Kademeli TP1 (%80) / TP2 / TP3:</b> <code>{tp1_str}</code> / <code>{tp2_str}</code> / <code>{tp3_str}</code>\n"
-                f"  • <b>Otomatik Stop-Loss (1.05):</b> <code>{sl_str}</code> <i>(Maks. Risk: -{est_sl_usd:.2f}$)</i>\n"
+                f"  • <b>Otomatik Stop-Loss:</b> <code>{sl_str}</code> <i>(Maks. Risk: -{est_sl_usd:.2f}$)</i>\n"
                 f"  • <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> ({eff_lev}x ➡️ <code>{notional_usd:.0f}$</code> Büyüklük)",
             )
         return False, f"⚠️ <b>Bybit Demo Giriş Hatası:</b> <code>{res.get('retMsg')}</code>"

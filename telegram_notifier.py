@@ -131,40 +131,67 @@ def format_setup_message(
             "videodaki kural gereği yeni trend yönünde BoS onaylandı!\n"
         )
 
-    if alert_type == "STAGE_1":
-        header = "🎯 <b>AŞAMA 1 — FİBONACCİ KURULUMU HAZIR (LİMİT EMİR PUSUSU)</b>"
-        status_line = (
-            f"⏳ <b>Durum:</b> BoS mum kapanışıyla onaylandı, geri çekilme başladı "
-            f"(Şu an: <code>%{setup.current_retracement * 100:.1f}</code> geri çekildi).\n"
-            f"📌 <b>Eylem:</b> <code>0.618</code> seviyesine Limit Emir kurabilir veya Altın Bölge bildirimini bekleyebilirsin."
-        )
+    is_sniper = "SNIPER" in setup.setup_id or Config.STRATEGY_MODE == "SNIPER"
+    if is_sniper:
+        dir_text = "LONG (Kuantum Sniper Dönüşü)" if is_long else "SHORT (Kuantum Sniper Dönüşü)"
+        struct_text = "Bollinger + RSI(7) Tükeniş + Likidite Süpürmesi"
+        bos_label = "🎯 <b>Referans Bant / Likidite Seviyesi:</b>"
+        entry_label = "🎯 <b>Onaylı Sniper Giriş Fiyatı:</b>"
+        sl_label = "🛑 <b>Koruma Kalkanı Stop-Loss (Fitil + 1.25 ATR):</b>"
+        if alert_type == "STAGE_1":
+            header = "⏳ <b>KUANTUM SNIPER PUSUSU — BOLLINGER / RSI(7) TÜKENİŞ BÖLGESİNDE!</b>"
+            status_line = (
+                "⏳ <b>Durum:</b> Fiyat Bollinger Bandı dışına taştı ve RSI(7) aşırı tükeniş bölgesinde.\n"
+                "📌 <b>Eylem:</b> Dönüş mumu kapanışı bekleniyor (Kapanış onaylandığı an otomatik açılacak)."
+            )
+        else:
+            header = "🎯 <b>KUANTUM SNIPER (%82+ WR) — ONAYLI GİRİŞ SİNYALİ!</b>"
+            conf_note = (
+                f"\n🕯 <b>Mum Onayı:</b> {setup.candle_confirmation}"
+                if setup.candle_confirmation
+                else "\n🕯 <b>Mum Onayı:</b> Güçlü Dönüş Mumu Kapanışı Onaylandı"
+            )
+            status_line = f"✅ <b>Sniper Tetikleyici Onaylandı!</b>{conf_note}"
+        band_line = ""
     else:
-        header = "🔥 <b>AŞAMA 2 — FİYAT ALTIN BÖLGEDE (0.500 – 0.618)!</b>"
-        touch_note = (
-            "✅ <b>0.618 Altın Cep Seviyesine Değdi!</b>"
-            if setup.touched_0618
-            else "⚡ <b>0.500 – 0.618 Altın Bölge İçinde!</b>"
-        )
-        conf_note = (
-            f"\n🕯 <b>Mum Onayı:</b> {setup.candle_confirmation}"
-            if setup.candle_confirmation
-            else "\n🕯 <b>Mum Onayı:</b> Henüz kapanmış onay mumu yok (0.618 limit giriş aktif)."
-        )
-        status_line = (
-            f"{touch_note} (En derin temas: <code>{setup.deepest_retracement:.3f}</code>)"
-            f"{conf_note}"
-        )
+        bos_label = "💥 <b>Kırılan Yapı (BoS):</b>"
+        entry_label = "🎯 <b>İdeal Giriş (0.618 Limit):</b>"
+        sl_label = "🛑 <b>Stop-Loss (1'in Dışı):</b>"
+        if alert_type == "STAGE_1":
+            header = "🎯 <b>AŞAMA 1 — FİBONACCİ KURULUMU HAZIR (LİMİT EMİR PUSUSU)</b>"
+            status_line = (
+                f"⏳ <b>Durum:</b> BoS mum kapanışıyla onaylandı, geri çekilme başladı "
+                f"(Şu an: <code>%{setup.current_retracement * 100:.1f}</code> geri çekildi).\n"
+                f"📌 <b>Eylem:</b> <code>0.618</code> seviyesine Limit Emir kurabilir veya Altın Bölge bildirimini bekleyebilirsin."
+            )
+        else:
+            header = "🔥 <b>AŞAMA 2 — FİYAT ALTIN BÖLGEDE (0.580 – 0.618)!</b>"
+            touch_note = (
+                "✅ <b>0.618 Altın Cep Seviyesine Değdi!</b>"
+                if setup.touched_0618
+                else "⚡ <b>0.580 – 0.618 Altın Bölge İçinde!</b>"
+            )
+            conf_note = (
+                f"\n🕯 <b>Mum Onayı:</b> {setup.candle_confirmation}"
+                if setup.candle_confirmation
+                else "\n🕯 <b>Mum Onayı:</b> Henüz kapanmış onay mumu yok (0.618 limit giriş aktif)."
+            )
+            status_line = (
+                f"{touch_note} (En derin temas: <code>{setup.deepest_retracement:.3f}</code>)"
+                f"{conf_note}"
+            )
+        band_line = f"  • 🟠 <b>Altın Bölge Bandı:</b> <code>{fmt_price(setup.fib.level_0500)}</code> – <code>{fmt_price(setup.fib.level_0618)}</code>\n"
 
     msg = (
         f"{header}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{dir_emoji} <b>Parite:</b> #{setup.symbol} | <b>15dk</b> | <b>{dir_text}</b>\n"
-        f"📐 <b>Piyasa Yapısı:</b> {struct_text}\n"
-        f"💥 <b>Kırılan Yapı (BoS):</b> <code>{fmt_price(setup.broken_structure_price)}</code> "
+        f"📐 <b>Strateji Motoru:</b> {struct_text}\n"
+        f"{bos_label} <code>{fmt_price(setup.broken_structure_price)}</code> "
         f"(Saat {fmt_ts_tr(setup.bos_timestamp)} mumu kapattı)"
         f"{flip_banner}\n"
         f"{status_line}\n\n"
-        f"🧠 <b>SİNYAL GÜCÜ & SMC / ICT ANALİZİ:</b>\n"
+        f"🧠 <b>SİNYAL GÜCÜ & ALGORİTMİK ANALİZ:</b>\n"
         f"  • <b>Güç Skoru:</b> <code>{setup.strength_score} / 100</code> — <b>{grade_badge}</b>\n"
         f"  • <b>Kesişimler:</b> {conf_str}\n\n"
         f"💼 <b>KASA YÖNETİMİ ÖNERİSİ (Kasa: {bankroll:.2f}$ | {lev}x İzole):</b>\n"
@@ -172,18 +199,18 @@ def format_setup_message(
         f"  • 🛡 <b>Stop Olursa Riskin:</b> <code>-{sl_loss_usd:.2f}$</code> <i>(Kasanın sadece %{(sl_loss_usd / bankroll) * 100:.1f}'i)</i>\n"
         f"  • 🎯 <b>Tam Kâr Potansiyeli:</b> TP1: <b>+{tp1_full_usd:.2f}$</b> | TP2: <b>+{tp2_full_usd:.2f}$</b> | TP3: <b>+{tp3_full_usd:.2f}$</b>\n\n"
         f"💰 <b>Anlık Fiyat:</b> <code>{fmt_price(setup.current_price)}</code>\n"
-        f"  • 🎯 <b>İdeal Giriş (0.618 Limit):</b> <code>{fmt_price(setup.fib.level_0618)}</code>\n"
-        f"  • 🟠 <b>Altın Bölge Bandı:</b> <code>{fmt_price(setup.fib.level_0500)}</code> – <code>{fmt_price(setup.fib.level_0618)}</code>\n"
-        f"  • 🛑 <b>Stop-Loss (1'in Dışı):</b> <code>{fmt_price(setup.fib.stop_loss)}</code> "
+        f"  • {entry_label} <code>{fmt_price(setup.fib.level_0618)}</code>\n"
+        f"{band_line}"
+        f"  • {sl_label} <code>{fmt_price(setup.fib.stop_loss)}</code> "
         f"(Spot: <code>-%{sl_pct:.2f}</code> | {lev}x: <code>-%{sl_10x:.1f}</code>)\n\n"
         f"🎯 <b>KÂR ALMA (TP) & İZ SÜREN STOP HEDEFLERİ:</b>\n"
-        f"  1️⃣ <b>TP1 (0.0 Güvenli Hedef — 1:{setup.rrr_at_0618:.2f} RRR):</b>\n"
+        f"  1️⃣ <b>TP1 (%80 Kâr Kilidi Hedefi — 1:{setup.rrr_at_0618:.2f} RRR):</b>\n"
         f"     👉 <code>{fmt_price(setup.fib.level_0)}</code> (Spot: <code>+%{tp1_pct:.2f}</code> | {lev}x: <b>+%{tp1_10x:.1f}</b>)\n"
         f"     <i>📌 Eylem: Pozisyonun %80'ini kapatıp kârı cebe kilitle (+{tp1_full_usd * 0.80:.2f}$), SL'yi Girişe (Başabaş) çek!</i>\n"
-        f"  2️⃣ <b>TP2 (-0.5 Uzatma — 1:{setup.rrr_tp2:.2f} RRR):</b>\n"
+        f"  2️⃣ <b>TP2 (Orta Bant / 1.85x ATR Hedefi — 1:{setup.rrr_tp2:.2f} RRR):</b>\n"
         f"     👉 <code>{fmt_price(setup.fib.level_neg_05)}</code> (Spot: <code>+%{tp2_pct:.2f}</code> | {lev}x: <b>+%{tp2_10x:.1f}</b>)\n"
         f"     <i>📌 Eylem: %10 daha kâr al (+{tp2_full_usd * 0.10:.2f}$ ek kâr), SL'yi TP1 seviyesine taşı!</i>\n"
-        f"  3️⃣ <b>TP3 (-1.0 Tam Uzatma — 1:{setup.rrr_tp3:.2f} RRR):</b>\n"
+        f"  3️⃣ <b>TP3 (Tam Trend Hedefi — 1:{setup.rrr_tp3:.2f} RRR):</b>\n"
         f"     👉 <code>{fmt_price(setup.fib.level_neg_10)}</code> (Spot: <code>+%{tp3_pct:.2f}</code> | {lev}x: <b>+%{tp3_10x:.1f}</b>)\n"
         f"     <i>📌 Eylem: Kalan %10 pozisyonu tamamen kapat (+{tp3_full_usd * 0.10:.2f}$ ek kâr)!</i>\n\n"
         f"🔍 <b>FİLTRE KONTROLLERİ:</b>\n"

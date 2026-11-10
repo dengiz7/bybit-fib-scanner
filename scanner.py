@@ -370,6 +370,26 @@ class ScannerEngine:
                         loss_usd = -1.0 * pos_usd * sl_ratio
                         tot_usd = self._record_trade_event(tid, tr, "STOP_LOSS", loss_usd)
                         demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "STOP_LOSS") if not self.dry_run else ""
+                        
+                        # Peş peşe stop sayacı ve dalgalanma koruma molası (Config'de açıksa)
+                        if Config.COOLDOWN_AFTER_STOPS > 0:
+                            consec = int(self.state.get("consecutive_stops", 0)) + 1
+                            self.state["consecutive_stops"] = consec
+                            if consec >= Config.COOLDOWN_AFTER_STOPS:
+                                cooldown_ms = int(time.time() * 1000) + (Config.COOLDOWN_MINUTES * 60 * 1000)
+                                self.state["cooldown_until_ts"] = cooldown_ms
+                                self.state["consecutive_stops"] = 0
+                                if not self.dry_run and self.notifier.is_configured:
+                                    m_cool = (
+                                        f"🛡️ <b>PİYASA DALGALANMA KORUMASI DEVREYE GİRDİ</b>\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"⚠️ Peş peşe {Config.COOLDOWN_AFTER_STOPS} işlem stop-loss oldu!\n"
+                                        f"🛑 Piyasa genelindeki anlık dump/sweep dalgalanmalarından kasayı korumak için <b>{Config.COOLDOWN_MINUTES} dakika yeni işlem açma durduruldu</b>.\n"
+                                        f"⏱️ Süre bitiminde sistem piyasa durulmuş olarak taramalara otomatik devam edecektir."
+                                    )
+                                    self.notifier.send_message(m_cool)
+                                    print(f"[KORUMA] Peş peşe {Config.COOLDOWN_AFTER_STOPS} stop! {Config.COOLDOWN_MINUTES} dk mola.")
+
                         if not self.dry_run and self.notifier.is_configured:
                             m_txt = format_tp_hit_message(
                                 tr,
@@ -392,6 +412,7 @@ class ScannerEngine:
                 )
                 if hit_tp2 and "TP2" not in hits:
                     hits.append("TP2")
+                    self.state["consecutive_stops"] = 0
                     tp2_ratio = abs(tp2_p - entry_p) / entry_p if entry_p > 0 else 0.03
                     rem_gain_usd = (1.0 - Config.TP1_CLOSE_PCT) * pos_usd * tp2_ratio
                     tot_usd = self._record_trade_event(tid, tr, "TP2", rem_gain_usd)
@@ -418,6 +439,7 @@ class ScannerEngine:
                 )
                 if hit_tp1 and "TP1" not in hits:
                     hits.append("TP1")
+                    self.state["consecutive_stops"] = 0
                     tr["current_sl"] = entry_p  # Stop'u başabaş (giriş) seviyesine çek
                     tp1_ratio = abs(tp1_p - entry_p) / entry_p if entry_p > 0 else 0.016
                     gain_tp1_usd = Config.TP1_CLOSE_PCT * pos_usd * tp1_ratio
@@ -436,6 +458,10 @@ class ScannerEngine:
                             m_txt += f"\n\n{demo_note}"
                         self.notifier.send_message(m_txt)
                         print(f"[TELEGRAM GÖNDERİLDİ] TP1 Vuruldu -> {sym} ({direction}) (+{gain_tp1_usd:.2f}$)")
+
+                    if Config.TP1_CLOSE_PCT >= 0.99:
+                        del tracked_trades[tid]
+                        continue
 
                 # --- DİNAMİK KÂR KİLİDİ (TP1'e %85 yaklaşıp dönüş fitili verirse erkenden kapat) ---
                 tp1_dist = abs(tp1_p - entry_p)
@@ -465,8 +491,19 @@ class ScannerEngine:
                         self.notifier.send_message(m_txt)
                         print(f"[TELEGRAM GÖNDERİLDİ] Dinamik TP1 Kâr Kilidi -> {sym}")
 
+                    if Config.TP1_CLOSE_PCT >= 0.99:
+                        del tracked_trades[tid]
+                        continue
+
             # 2) Yeni Hacimli Kırılımları Tara
             cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
+            cooldown_until = int(self.state.get("cooldown_until_ts", 0))
+            now_ms = int(time.time() * 1000)
+            in_cooldown = (Config.COOLDOWN_AFTER_STOPS > 0) and (now_ms < cooldown_until)
+            if in_cooldown:
+                rem_m = max(1, int((cooldown_until - now_ms) / 60000))
+                print(f"[MOLA] Dalgalanma koruma molası devrede ({rem_m} dk kaldı). Yeni pozisyon açılmıyor.")
+
             for symbol, (ticker, candles) in klines_map.items():
                 setup = analyze_symbol(
                     symbol=symbol,
@@ -482,6 +519,8 @@ class ScannerEngine:
                 already_sent = sent_alerts.get(setup.setup_id, [])
 
                 if "BREAKOUT" not in already_sent:
+                    if in_cooldown:
+                        continue  # Mola süresince yeni pozisyon açma
                     msg = format_setup_message(setup, current_bankroll=cur_bank)
                     if not self.dry_run:
                         _, demo_note = self.demo_trader.place_setup_order(setup, "BREAKOUT", cur_bank)
@@ -517,7 +556,7 @@ class ScannerEngine:
                                 "strength_score": setup.strength_score,
                                 "quality_grade": setup.quality_grade,
                                 "margin_usd": setup.recommended_margin_usd,
-                                "leverage": Config.DEFAULT_LEVERAGE,
+                                "leverage": getattr(setup, "leverage", Config.DEFAULT_LEVERAGE),
                                 "entry_ts": candles[-2].timestamp if len(candles) >= 2 else int(time.time() * 1000),
                                 "hits": [],
                                 "realized_usd": 0.0,

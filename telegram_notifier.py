@@ -50,16 +50,18 @@ def format_setup_message(
     dir_text = "LONG (Yukarı Hacimli Kırılım)" if is_long else "SHORT (Aşağı Hacimli Kırılım)"
     level_label = "🔺 20-Mum Zirvesi" if is_long else "🔻 20-Mum Tabanı"
 
-    lev = Config.DEFAULT_LEVERAGE
+    bankroll = max(10.0, current_bankroll)
+    margin_usd = max(2.50, round(bankroll * (Config.MARGIN_PER_TRADE_PCT / 100.0), 2))
+    sl_ratio = (setup.sl_pct / 100.0) if setup.sl_pct > 0 else 0.015
+    calc_lev = int(round(Config.MAX_RISK_USD / (margin_usd * sl_ratio)))
+    lev = getattr(setup, "leverage", max(2, min(Config.DEFAULT_LEVERAGE, calc_lev)))
+    pos_usd = margin_usd * lev
+
     tp1_lev = setup.tp1_pct * lev
     tp2_lev = setup.tp2_pct * lev
     sl_lev = setup.sl_pct * lev
 
-    bankroll = max(10.0, current_bankroll)
-    margin_usd = max(4.0, bankroll * (Config.MARGIN_PER_TRADE_PCT / 100.0))
-    pos_usd = margin_usd * lev
-
-    sl_loss_usd = pos_usd * (setup.sl_pct / 100.0)
+    sl_loss_usd = min(Config.MAX_RISK_USD * 1.05, pos_usd * sl_ratio)
     tp1_win_usd = (pos_usd * (setup.tp1_pct / 100.0)) * Config.TP1_CLOSE_PCT
     tp2_win_usd = (pos_usd * (setup.tp2_pct / 100.0)) * (1.0 - Config.TP1_CLOSE_PCT)
     total_pot_win = tp1_win_usd + tp2_win_usd
@@ -67,6 +69,23 @@ def format_setup_message(
     notes_str = "\n".join(f"  • {n}" for n in setup.notes)
     tv_url = f"https://www.tradingview.com/chart/?symbol=BYBIT:{setup.symbol}.P&interval=15"
     bybit_url = f"https://www.bybit.com/trade/usdt/{setup.symbol}"
+
+    if Config.TP1_CLOSE_PCT >= 0.99:
+        tp_section = (
+            f"🎯 <b>KÂR ALMA HEDEFİ (TEK HEDEFLE %100 KAPANIŞ):</b>\n"
+            f"  👉 <code>{fmt_price(setup.tp1_price)}</code> (Spot: <code>+%{setup.tp1_pct:.2f}</code> | {lev}x: <b>+%{tp1_lev:.1f}</b>)\n"
+            f"  <i>📌 Eylem: Hedefe ulaşıldığında pozisyonun <b>%100'ü kapatılır (+{tp1_win_usd:.2f}$)</b> ve tam kâr kasaya eklenir!</i>\n\n"
+        )
+    else:
+        tp_section = (
+            f"🎯 <b>KÂR ALMA (TP) HEDEFLERİ:</b>\n"
+            f"  1️⃣ <b>TP1 (1.6x ATR Hedefi — 1:{setup.rrr_tp1:.2f} RRR):</b>\n"
+            f"     👉 <code>{fmt_price(setup.tp1_price)}</code> (Spot: <code>+%{setup.tp1_pct:.2f}</code> | {lev}x: <b>+%{tp1_lev:.1f}</b>)\n"
+            f"     <i>📌 Eylem: Pozisyonun %{int(Config.TP1_CLOSE_PCT*100)}'ini kapatıp kârı cebe kilitle (+{tp1_win_usd:.2f}$), SL'yi Girişe çek!</i>\n"
+            f"  2️⃣ <b>TP2 (2.8x ATR Trend Uzatması — 1:{setup.rrr_tp2:.2f} RRR):</b>\n"
+            f"     👉 <code>{fmt_price(setup.tp2_price)}</code> (Spot: <code>+%{setup.tp2_pct:.2f}</code> | {lev}x: <b>+%{tp2_lev:.1f}</b>)\n"
+            f"     <i>📌 Eylem: Kalan %{int((1-Config.TP1_CLOSE_PCT)*100)} pozisyonu kapat (+{tp2_win_usd:.2f}$) ve işlemi bitir!</i>\n\n"
+        )
 
     msg = (
         f"🚀 <b>HACİM PATLAMASI & ZİRVE KIRILIMI (BREAKOUT SNIPER)</b>\n"
@@ -76,20 +95,15 @@ def format_setup_message(
         f"⚡ <b>Hacim Gücü:</b> <b>{setup.rvol}x RVOL</b> (24s Hacim: <code>{fmt_usd_compact(setup.turnover_24h)}</code>)\n\n"
         f"🧠 <b>KIRILIM ONAYLARI ({setup.strength_score}/100 — {setup.quality_grade}):</b>\n"
         f"{notes_str}\n\n"
-        f"💼 <b>KASA & POZİSYON PLANI ({lev}x İzole):</b>\n"
-        f"  • 💵 <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> (Kasanın %{Config.MARGIN_PER_TRADE_PCT:.0f}'i ➡️ <code>{pos_usd:.0f}$</code> Büyüklük)\n"
-        f"  • 🛡 <b>Stop Olursa Risk:</b> <code>-{sl_loss_usd:.2f}$</code>\n"
-        f"  • 🎯 <b>Hedef Kâr Kazancı:</b> <b><code>+{total_pot_win:.2f}$</code></b> (TP1: +{tp1_win_usd:.2f}$ | TP2: +{tp2_win_usd:.2f}$)\n\n"
+        f"💼 <b>KASA & POZİSYON PLANI:</b>\n"
+        f"  • 💵 <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> (Kasanın %{Config.MARGIN_PER_TRADE_PCT:.0f}'i Sabit Marjin)\n"
+        f"  • ⚡ <b>Dinamik Kaldıraç:</b> <b>{lev}x İzole</b> (Pozisyon Büyüklüğü: <code>{pos_usd:.0f}$</code>)\n"
+        f"  • 🛡 <b>Stop Olursa Maks. Risk:</b> <code>-{sl_loss_usd:.2f}$</code> (Sabit Risk Limiti: {Config.MAX_RISK_USD:.2f}$)\n"
+        f"  • 🎯 <b>Hedef Kâr Kazancı:</b> <b><code>+{total_pot_win:.2f}$</code></b>\n\n"
         f"💰 <b>Onaylı Giriş Fiyatı:</b> <code>{fmt_price(setup.entry_price)}</code>\n"
         f"🛑 <b>Koruma Stop-Loss:</b> <code>{fmt_price(setup.sl_price)}</code> "
         f"(Spot: <code>-%{setup.sl_pct:.2f}</code> | {lev}x: <code>-%{sl_lev:.1f}</code>)\n\n"
-        f"🎯 <b>KÂR ALMA (TP) HEDEFLERİ:</b>\n"
-        f"  1️⃣ <b>TP1 (1.6x ATR Hedefi — 1:{setup.rrr_tp1:.2f} RRR):</b>\n"
-        f"     👉 <code>{fmt_price(setup.tp1_price)}</code> (Spot: <code>+%{setup.tp1_pct:.2f}</code> | {lev}x: <b>+%{tp1_lev:.1f}</b>)\n"
-        f"     <i>📌 Eylem: Pozisyonun %{int(Config.TP1_CLOSE_PCT*100)}'ini kapatıp kârı cebe kilitle (+{tp1_win_usd:.2f}$), SL'yi Girişe çek!</i>\n"
-        f"  2️⃣ <b>TP2 (2.8x ATR Trend Uzatması — 1:{setup.rrr_tp2:.2f} RRR):</b>\n"
-        f"     👉 <code>{fmt_price(setup.tp2_price)}</code> (Spot: <code>+%{setup.tp2_pct:.2f}</code> | {lev}x: <b>+%{tp2_lev:.1f}</b>)\n"
-        f"     <i>📌 Eylem: Kalan %{int((1-Config.TP1_CLOSE_PCT)*100)} pozisyonu kapat (+{tp2_win_usd:.2f}$) ve işlemi bitir!</i>\n\n"
+        f"{tp_section}"
         f"🔗 <a href=\"{tv_url}\">TradingView Grafiği</a>  |  <a href=\"{bybit_url}\">Bybit Vadeli Tahtası</a>"
     )
     return msg
@@ -108,16 +122,26 @@ def format_tp_hit_message(
     entry = float(trade["entry_price"])
     tp1 = float(trade["tp1_price"])
     tp2 = float(trade["tp2_price"])
-    lev = Config.DEFAULT_LEVERAGE
+    lev = float(trade.get("leverage") or Config.DEFAULT_LEVERAGE)
     dir_emoji = "🟢" if direction == "LONG" else "🔴"
 
     if event_type == "TP1":
         pct = abs(tp1 - entry) / entry * 100.0
+        if Config.TP1_CLOSE_PCT >= 0.99:
+            return (
+                f"🎯 <b>TP HEDEFİ VURULDU (%100 KAPANIŞ)! — #{symbol}</b> ({dir_emoji} {direction})\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🚀 <b>Giriş:</b> <code>{fmt_price(entry)}</code> ➡️ <b>Çıkış:</b> <code>{fmt_price(tp1)}</code>\n"
+                f"📈 <b>Fiyat Hareketi:</b> Spot <code>+%{pct:.2f}</code> | {lev:.0f}x: <b>+%{pct * lev:.1f}</b>\n"
+                f"💵 <b>Cebe Kilitlenen Net Kâr (%100):</b> <b><code>{fmt_usd_signed(event_pnl_usd)}</code></b>\n"
+                f"💼 <b>Güncel Kasa:</b> <b><code>{current_bankroll:.2f}$</code></b>\n\n"
+                f"🎉 Pozisyonun %100'ü hedefe ulaştı, kâr nakde dönüştü ve işlem tamamlandı!"
+            )
         return (
             f"✅ <b>TP1 HEDEFİ VURULDU! — #{symbol}</b> ({dir_emoji} {direction})\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"🎯 <b>Giriş:</b> <code>{fmt_price(entry)}</code> ➡️ <b>TP1:</b> <code>{fmt_price(tp1)}</code>\n"
-            f"📈 <b>Fiyat Hareketi:</b> Spot <code>+%{pct:.2f}</code> | {lev}x Kaldıraç: <b>+%{pct * lev:.1f}</b>\n"
+            f"📈 <b>Fiyat Hareketi:</b> Spot <code>+%{pct:.2f}</code> | {lev:.0f}x Kaldıraç: <b>+%{pct * lev:.1f}</b>\n"
             f"💵 <b>Cebe Kilitlenen Net Kâr (%75):</b> <b><code>{fmt_usd_signed(event_pnl_usd)}</code></b>\n"
             f"💼 <b>Güncel Kasa:</b> <b><code>{current_bankroll:.2f}$</code></b>\n\n"
             f"🛡 <b>KORUMA DEVREDE:</b>\n"

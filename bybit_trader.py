@@ -425,10 +425,25 @@ class BybitDemoTrader:
                     f"⚠️ <b>Bybit Demo Kasa Koruması:</b> Maksimum {Config.MAX_CONCURRENT_DEMO_TRADES} açık pozisyon sınırına ulaşıldığı için #{symbol} emri pas geçildi.",
                 )
 
-        eff_lev = self.ensure_leverage(symbol, lev)
+        # 1) Sabit Kasanın %10'u Marjin Hesabı (örn. 100$'da 10$ Marjin)
+        margin_usd = max(2.50, round(virtual_bankroll_usd * (Config.MARGIN_PER_TRADE_PCT / 100.0), 2))
         spec = self.get_instrument_spec(symbol)
+        try:
+            max_inst_lev = int(float(spec.get("maxLeverage", "30")))
+        except Exception:
+            max_inst_lev = 30
 
-        margin_usd = max(4.0, setup.recommended_margin_usd)
+        # 2) Stop Mesafesine Göre Dinamik Kaldıraç (Maksimum 4.00$ Stop Riski Koruması)
+        # Formül: Kaldıraç = 4.00$ / (10$ * SL%) -> Örn: %2 stopta 20x, %5 stopta 8x kaldıraç!
+        sl_ratio = (setup.sl_pct / 100.0) if setup.sl_pct > 0 else 0.015
+        calc_lev = int(round(Config.MAX_RISK_USD / (margin_usd * sl_ratio)))
+        target_lev = max(2, min(Config.DEFAULT_LEVERAGE, max_inst_lev, calc_lev))
+
+        # Bybit'te paritenin kaldıracını izole olarak ayarla
+        eff_lev = self.ensure_leverage(symbol, target_lev)
+        setup.leverage = eff_lev
+        setup.recommended_margin_usd = margin_usd
+
         notional_usd = margin_usd * eff_lev
         entry_ref = setup.entry_price
         if entry_ref <= 0:
@@ -467,7 +482,7 @@ class BybitDemoTrader:
                 f"  • <b>Kırılan Seviye:</b> <code>{setup.breakout_level}</code> | <b>Hacim:</b> <code>{setup.rvol:.1f}x RVOL</code>\n"
                 f"  • <b>Kademeli Hedefler:</b> TP1 (%75): <code>{tp1_str}</code> (+%{setup.tp1_pct:.2f}) | TP2: <code>{tp2_str}</code> (+%{setup.tp2_pct:.2f})\n"
                 f"  • <b>Otomatik Stop-Loss:</b> <code>{sl_str}</code> <i>(Maks. Risk: -{est_sl_usd:.2f}$)</i>\n"
-                f"  • <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> ({eff_lev}x ➡️ <code>{notional_usd:.0f}$</code> Büyüklük)",
+                f"  • <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> (Kasanın %10'u ➡️ <b>{eff_lev}x Dinamik Kaldıraç</b> ➡️ <code>{notional_usd:.0f}$</code> Büyüklük)",
             )
         return False, f"⚠️ <b>Bybit Demo Giriş Hatası:</b> <code>{res.get('retMsg')}</code>"
 
@@ -496,10 +511,10 @@ class BybitDemoTrader:
             return ""
 
         if event_type == "TP1":
-            # 1) Pozisyonun %75'ini (Config.TP1_CLOSE_PCT) Market Reduce-Only ile kapatıp ana kârı cebe kilitle!
+            # 1) Pozisyonun TP1 oranını Market Reduce-Only ile kapatıp ana kârı cebe kilitle!
             tp1_pct_close = Config.TP1_CLOSE_PCT
             close_qty = self.round_step(cur_size * tp1_pct_close, spec["qtyStep"], round_down=True)
-            if float(close_qty) < float(spec["minOrderQty"]):
+            if float(close_qty) < float(spec["minOrderQty"]) or tp1_pct_close >= 0.99:
                 close_qty = self.round_step(cur_size, spec["qtyStep"], round_down=True)
             if float(close_qty) >= float(spec["minOrderQty"]):
                 self._request(
@@ -516,7 +531,15 @@ class BybitDemoTrader:
                     },
                     signed=True,
                 )
-            # 2) Kalan %25 pozisyonun Stop-Loss'unu Giriş Fiyatına (Başabaş) çek!
+
+            # %100 Kapanış seçildiyse bekleyen tüm emirleri temizle ve işlemi bitir
+            if tp1_pct_close >= 0.99:
+                self.cancel_all_symbol_orders(symbol)
+                return (
+                    f"🎯 <b>Bybit Demo:</b> #{symbol} pozisyonunun <b>%100'ü TP1 Hedefinde Kârla Kapatıldı</b> ve tüm bekleyen emirler temizlendi!"
+                )
+
+            # 2) Kalan pozisyonun Stop-Loss'unu Giriş Fiyatına (Başabaş) çek!
             be_price = self.round_step(avg_entry, spec["tickSize"], round_down=(direction == "LONG"))
             self._request(
                 "POST",

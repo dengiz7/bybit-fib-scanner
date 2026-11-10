@@ -63,27 +63,31 @@ class Config:
     SCAN_INTERVAL_SECONDS: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))  # Tarama döngü süresi (sn)
 
     # --- Hacim Patlaması & Kırılım (Breakout Sniper) Parametreleri ---
-    BREAKOUT_LOOKBACK: int = int(os.getenv("BREAKOUT_LOOKBACK", "20"))  # Son 20 mumun (5 saat) tavanı / tabanı
+    BREAKOUT_LOOKBACK: int = int(os.getenv("BREAKOUT_LOOKBACK", "16"))  # Son 16 mumun (4 saat) tavanı / tabanı (Daha çevik tespit)
     MIN_RVOL: float = float(os.getenv("MIN_RVOL", "1.80"))  # Kırılım mumu en az 1.8x ortalama hacimde olmalı
     MIN_BODY_RATIO: float = float(os.getenv("MIN_BODY_RATIO", "0.45"))  # Kırılım mumunun gövdesi mum boyunun en az %45'i olmalı
     MIN_TP1_MOVE_PCT: float = float(os.getenv("MIN_TP1_MOVE_PCT", "1.40"))  # Komisyonu ezen min %1.40 saf fiyat hareketi
     TP1_ATR_MULT: float = float(os.getenv("TP1_ATR_MULT", "1.60"))  # TP1: 1.6x ATR
     TP2_ATR_MULT: float = float(os.getenv("TP2_ATR_MULT", "2.80"))  # TP2: 2.8x ATR
-    SL_ATR_MULT: float = float(os.getenv("SL_ATR_MULT", "1.15"))   # SL: Kırılan seviyenin 1.15x ATR arkası
-    TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "0.75"))  # TP1'de pozisyonun %75'ini kapat, SL'yi girişe çek!
+    SL_ATR_MULT: float = float(os.getenv("SL_ATR_MULT", "1.15"))   # SL: Kırılan seviyenin 1.15x ATR arkası (Dinamik piyasa koşullarına göre)
+    TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "1.00"))  # TP1'de pozisyonun %100'ünü kapatıp tam kârı al (Sniper Modu)!
 
     # --- Akıllı Risk Filtresi & Erken Çıkış Parametreleri ---
-    MAX_BREAKOUT_ATR_DIST: float = float(os.getenv("MAX_BREAKOUT_ATR_DIST", "1.40"))  # Kırılım seviyesinden max 1.4x ATR uzaklaşma (Geç sinyalleri reddet)
+    MAX_BREAKOUT_ATR_DIST: float = float(os.getenv("MAX_BREAKOUT_ATR_DIST", "0.65"))  # Kırılım seviyesinden max 0.65x ATR uzaklaşma (Tepeden alımı engeller, geç sinyalleri eler!)
+    MAX_CHASE_ATR_RATIO: float = float(os.getenv("MAX_CHASE_ATR_RATIO", "0.65"))  # Kırılım seviyesinden max 0.65x ATR kovalamaca sınırı
     MAX_REJECTION_WICK_RATIO: float = float(os.getenv("MAX_REJECTION_WICK_RATIO", "0.32"))  # Kırılım mumunda ters yöndeki fitil max %32 (Tepeden ret yemiş fitilleri reddet)
     STAGNATION_MAX_CANDLES: int = int(os.getenv("STAGNATION_MAX_CANDLES", "10"))  # 10 mum (2.5 saat) boyunca girişte oyalanırsa başabaş kapat
     STAGNATION_THRESHOLD_PCT: float = float(os.getenv("STAGNATION_THRESHOLD_PCT", "0.40"))  # Girişin %0.4 civarındaysa oyalanma say
     NEAR_TP_TRIGGER_PCT: float = float(os.getenv("NEAR_TP_TRIGGER_PCT", "0.85"))  # TP1'e %85 yaklaşınca dönüş fitilinde erken kâr kilidi
 
-    # --- Kasa Yönetimi ve Pozisyon Büyüklüğü (100$ Kasa & 30x İzole Kaldıraç) ---
+    # --- Kasa Yönetimi, Sabit Dolar Riski ve Pozisyon Büyüklüğü ---
     DEFAULT_BANKROLL_USD: float = float(os.getenv("DEFAULT_BANKROLL_USD", "100.0"))
     DEFAULT_LEVERAGE: int = int(os.getenv("DEFAULT_LEVERAGE", "30"))
-    MARGIN_PER_TRADE_PCT: float = float(os.getenv("MARGIN_PER_TRADE_PCT", "10.0"))  # Her işleme kasanın %10'u (10$ marjin -> 300$ pozisyon)
+    MARGIN_PER_TRADE_PCT: float = float(os.getenv("MARGIN_PER_TRADE_PCT", "10.0"))  # Her işleme sabit kasanın %10'u marjinle gir
+    MAX_RISK_USD: float = float(os.getenv("MAX_RISK_USD", "4.00"))  # Sabit Dolar Riski: Stop olursa kasadan MAX 4.00$ gidebilir!
     MAX_CONCURRENT_DEMO_TRADES: int = int(os.getenv("MAX_CONCURRENT_DEMO_TRADES", "0"))  # 0 = Sınırsız (Bakiye el verdikçe fırsatlara girer)
+    COOLDOWN_AFTER_STOPS: int = int(os.getenv("COOLDOWN_AFTER_STOPS", "0"))  # 0 = Devre dışı (bekleme molası yok, fırsat gördükçe girer)
+    COOLDOWN_MINUTES: int = int(os.getenv("COOLDOWN_MINUTES", "0"))  # Mola süresi (0 dakika)
 
     # --- Bybit V5 Demo Trading Otomatik Al-Sat Ayarları ---
     BYBIT_DEMO_API_KEY: str = os.getenv("BYBIT_DEMO_API_KEY", "").strip()

@@ -40,8 +40,9 @@ class BreakoutSetup:
     session_label: str              # Aktif Seans
     strength_score: int             # Sinyal Güç Skoru (70 - 100)
     quality_grade: str              # "A+" veya "A"
-    recommended_margin_usd: float   # Önerilen Marjin Tutarı ($)
+    recommended_margin_usd: float   # Önerilen Marjin Tutarı ($ - Kasanın %10'u)
     notes: List[str]                # Kırılım Notları
+    leverage: int = 30              # Dinamik Stop Riski İçin Hesaplanmış Kaldıraç
 
 
 def compute_atr(candles: List[Candle], period: int = 14) -> float:
@@ -194,10 +195,23 @@ def analyze_breakout(
 
     # Kural 2: Fiyat Kırılım Seviyesinden Zaten Çok Uzaklaşmışsa (Chase / Geç Kalınmış Sinyal) -> REDDET!
     dist_from_breakout = abs(c.close - breakout_level)
-    if dist_from_breakout > Config.MAX_BREAKOUT_ATR_DIST * atr:
-        return None  # Fiyat çoktan fırlamış, tepeden/dipten yakalanma, REDDET!
+    max_chase_dist = Config.MAX_CHASE_ATR_RATIO * atr
+    if dist_from_breakout > max_chase_dist:
+        return None  # Fiyat çoktan fırlamış, tepeden/dipten kovalamak (FOMO) yasak, REDDET!
 
-    # Kural 3: 1 Saatlik Genel Trend Uyumu (48 Mum = 12 Saatlik EMA Trend Filtresi)
+    # Kural 3: Canlı Mumda Sahte Kırılım veya Aşırı Uzaklaşma Kontrolü
+    if direction == "LONG":
+        if live_c.close < breakout_level:
+            return None  # Sahte kırılım, canlı mum seviyenin altına çöktü!
+        if live_c.close > c.close + (0.50 * atr):
+            return None  # Canlı mumda fiyat daha da fırladı, geç kalındı!
+    elif direction == "SHORT":
+        if live_c.close > breakout_level:
+            return None  # Sahte kırılım, canlı mum seviyenin üstüne çöktü!
+        if live_c.close < c.close - (0.50 * atr):
+            return None  # Canlı mumda fiyat daha da fırladı, geç kalındı!
+
+    # Kural 4: 1 Saatlik Genel Trend Uyumu (48 Mum = 12 Saatlik EMA Trend Filtresi)
     ema_trend = compute_ema(closed, 48)
     if ema_trend > 0:
         if direction == "LONG" and c.close < ema_trend:
@@ -205,14 +219,14 @@ def analyze_breakout(
         elif direction == "SHORT" and c.close > ema_trend:
             return None  # 1 Saatlik genel yükseliş trendinin tersine cılız kırılım, REDDET!
 
-    # Kural 4: Tükenme (Exhaustion / RSI Aşırı Şişme) Filtresi
+    # Kural 5: Tükenme (Exhaustion / RSI Aşırı Şişme) Filtresi
     rsi_14 = compute_rsi(closed, 14)
     if direction == "LONG" and rsi_14 > 74.0:
         return None  # Aşırı alım tükeniş bölgesi, REDDET!
     elif direction == "SHORT" and rsi_14 < 26.0:
         return None  # Aşırı satım tükeniş bölgesi, REDDET!
 
-    # Kural 5: BTC Piyasa Rejimi / Korelasyon Filtresi
+    # Kural 6: BTC Piyasa Rejimi / Korelasyon Filtresi
     if btc_regime == "BTC_DUMP" and direction == "LONG":
         return None  # BTC sert çakılırken altcoin LONG'u REDDET!
     elif btc_regime == "BTC_PUMP" and direction == "SHORT":
@@ -224,16 +238,21 @@ def analyze_breakout(
     entry_p = c.close
     tp1_dist = max(Config.TP1_ATR_MULT * atr, entry_p * (Config.MIN_TP1_MOVE_PCT / 100.0))
     tp2_dist = max(Config.TP2_ATR_MULT * atr, tp1_dist * 1.75)
-    sl_dist = max(Config.SL_ATR_MULT * atr, entry_p * 0.008)
 
+    # Stop-Loss: Kırılan yapının (destek/direnç) ve kırılım mumu fitilinin arkasında güvenli bölge
+    # Not: Stop'u entry'den değil, kırılan yapıdan geriye koyuyoruz ki doğal retest stop ettirmesin!
     if direction == "LONG":
         tp1_p = entry_p + tp1_dist
         tp2_p = entry_p + tp2_dist
-        sl_p = entry_p - sl_dist
+        struct_sl = breakout_level - (Config.SL_ATR_MULT * atr)
+        candle_sl = c.low - (0.20 * atr)
+        sl_p = min(struct_sl, candle_sl, entry_p - (0.80 * atr))
     else:
         tp1_p = entry_p - tp1_dist
         tp2_p = entry_p - tp2_dist
-        sl_p = entry_p + sl_dist
+        struct_sl = breakout_level + (Config.SL_ATR_MULT * atr)
+        candle_sl = c.high + (0.20 * atr)
+        sl_p = max(struct_sl, candle_sl, entry_p + (0.80 * atr))
 
     # Canlı mumda fiyat çoktan TP1'e ulaştıysa veya SL'yi vurduysa geç kalmış sinyali alma
     if direction == "LONG" and (live_c.high >= tp1_p or live_c.low <= sl_p):
@@ -265,8 +284,13 @@ def analyze_breakout(
     score = min(99, score)
     grade = "A+" if score >= 85 else "A"
 
-    # Marjin Hesabı (Kasanın %10'u)
-    margin_usd = max(4.0, round(bankroll_usd * (Config.MARGIN_PER_TRADE_PCT / 100.0), 2))
+    # Sabit %10 Marjin & Dinamik Kaldıraç Hesabı (Maks 4.00$ Sabit Dolar Riski)
+    # Her işleme kasanın %10'u marjinle girilir; kaldıraç stop mesafesine göre otomatik ayarlanır!
+    margin_usd = max(2.50, round(bankroll_usd * (Config.MARGIN_PER_TRADE_PCT / 100.0), 2))
+    sl_ratio = (sl_pct / 100.0) if sl_pct > 0 else 0.015
+    calc_lev = int(round(Config.MAX_RISK_USD / (margin_usd * sl_ratio)))
+    dyn_lev = max(2, min(Config.DEFAULT_LEVERAGE, calc_lev))
+    notes.append(f"⚡ Dinamik Kaldıraç: {dyn_lev}x ({margin_usd:.1f}$ Marjin ➡️ Maks. {Config.MAX_RISK_USD:.2f}$ Stop Riski)")
 
     return BreakoutSetup(
         setup_id=f"{symbol}_{direction}_BRK_{c.timestamp}",
@@ -288,6 +312,7 @@ def analyze_breakout(
         strength_score=score,
         quality_grade=grade,
         recommended_margin_usd=margin_usd,
+        leverage=dyn_lev,
         notes=notes,
     )
 

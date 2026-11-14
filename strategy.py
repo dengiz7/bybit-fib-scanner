@@ -1,15 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-Hacim Patlaması ve Zirve Kırılımı (RVOL Breakout Sniper) + Akıllı Risk Filtresi Motoru
-- 15 Dakikalık Mumlar Üzerinde Donchian (20 Mum) Tavan / Taban Kırılımlarını Tarar
-- Şart 1: Fiyat son 20 mumun (5 saat) zirvesini yukarı (LONG) veya tabanını aşağı (SHORT) kırmalıdır.
-- Şart 2: Kırılım mumu güçlü olmalı (Gövde boyu >= %45, sadece fitil değil, net kapanış!).
-- Şart 3: Kırılım mumu 20 mumluk ortalama hacmin en az 1.8x katı olmalı (RVOL >= 1.8).
-- Şart 4: FİLTRE — Kırılım mumunda ters yönde uzun fitil (rejection / tepeden/dipten ret) olmamalı!
-- Şart 5: FİLTRE — Fiyat kırılım seviyesinden ATR'nin 1.4 katından fazla uzaklaşmamış olmalı (Geç kalınmış sinyalleri reddet).
-- Şart 6: FİLTRE — 1 Saatlik Genel Trend (48-Mum EMA) yönünde olmalı (Trend tersi zayıf tepkileri reddet).
-- Şart 7: FİLTRE — Son mumlarda tükenme (Exhaustion / RSI 74+ veya 26-) olmamalı.
-- Şart 8: FİLTRE — BTC ani ters yönde hareket etmiyor olmalı.
+Volatility Squeeze Ignition (Sıkışma Patlaması + Çift EMA Trend + Başabaş Kalkanı) Motoru
+- Şart 1 (Sıkışma): Son 10 mumun ATR'si, önceki 50 mumluk ATR'nin %92'sinin altında olmalıdır (enerji birikimi).
+- Şart 2 (Trend Hizası): Çift EMA (EMA20 & EMA50) ve RSI yönü sinyalle tam uyumlu olmalıdır.
+- Şart 3 (Kutu Kırılımı): Fiyat 10 mumluk sıkışma kutusunu RVOL >= 1.60x hacim ve >= %48 gövdeyle kırmalıdır.
+- Şart 4 (Pozitif R:R): Stop girişten 1.70x ATR, TP ise 2.60x ATR (1:1.53 RRR).
+- Şart 5 (Başabaş Kalkanı): İşlem +0.85R kâra ulaştığında stop komisyon korumalı başabaşa taşınır.
 """
 
 from dataclasses import dataclass
@@ -119,9 +115,9 @@ def analyze_breakout(
     bankroll_usd: float = Config.DEFAULT_BANKROLL_USD,
     btc_regime: Optional[str] = None,
 ) -> Optional[BreakoutSetup]:
-    """15 dakikalık mumlarda Hacim Patlamalı 20-Mum Zirve/Taban Kırılımını ve Akıllı Risk Filtrelerini analiz eder."""
+    """15 dakikalık mumlarda Volatility Squeeze Ignition (Sıkışma Patlaması) sinyallerini analiz eder."""
     lookback = Config.BREAKOUT_LOOKBACK
-    if len(candles) < lookback + 15:
+    if len(candles) < max(lookback + 15, 65):
         return None
 
     closed = candles[:-1]
@@ -137,6 +133,12 @@ def analyze_breakout(
     if candle_range > 4.2 * atr:
         return None
 
+    # Kural 0 (Sıkışma / Volatility Squeeze Şartı): Yorgun/şişmiş coinleri ele!
+    atr_10 = compute_atr(closed[-13:-1], 10)
+    atr_50 = compute_atr(closed[-57:-6], 50)
+    if atr_50 <= 0 or atr_10 <= 0 or atr_10 >= Config.SQUEEZE_ATR_RATIO * atr_50:
+        return None
+
     # Hacim Hesabı
     v_sma = compute_volume_sma(closed[:-1], 20)
     if v_sma <= 0:
@@ -146,7 +148,7 @@ def analyze_breakout(
     if rvol < Config.MIN_RVOL:
         return None
 
-    # Son 'lookback' mumun tavan ve taban seviyeleri (kırılım mumu hariç)
+    # Son 'lookback' (10) mumluk sıkışma kutusunun tavan ve taban seviyeleri
     window = closed[-(lookback + 1): -1]
     high_level = max(x.high for x in window)
     low_level = min(x.low for x in window)
@@ -160,99 +162,96 @@ def analyze_breakout(
     breakout_level = 0.0
     notes: List[str] = []
 
-    # 1) YUKARI KIRILIM (BULLISH BREAKOUT)
+    squeeze_pct = round((1.0 - (atr_10 / atr_50)) * 100.0, 1)
+
+    # 1) YUKARI PATLAMA (BULLISH SQUEEZE IGNITION)
     if c.close > high_level and c.close > c.open:
         direction = "LONG"
         breakout_level = high_level
-        notes.append(f"✅ {lookback} Mumluk Zirve Yukarı Kırıldı ({high_level:.4f})")
-        notes.append(f"⚡ Güçlü Hacim Patlaması: {rvol:.1f}x RVOL")
-        notes.append("📈 Güçlü Boğa Mum Gövdesi Onaylandı")
+        notes.append(f"🔋 Sıkışma Onayı: Volatilite %{squeeze_pct} Daralmıştı -> Yukarı Patlama ({high_level:.4f})")
+        notes.append(f"⚡ Hacim Gücü: {rvol:.1f}x RVOL | Güçlü Boğa Kapanışı")
 
-    # 2) AŞAĞI KIRILIM (BEARISH BREAKDOWN)
+    # 2) AŞAĞI PATLAMA (BEARISH SQUEEZE IGNITION)
     elif c.close < low_level and c.close < c.open:
         direction = "SHORT"
         breakout_level = low_level
-        notes.append(f"✅ {lookback} Mumluk Taban Aşağı Kırıldı ({low_level:.4f})")
-        notes.append(f"⚡ Güçlü Hacim Patlaması: {rvol:.1f}x RVOL")
-        notes.append("📉 Güçlü Ayı Mum Gövdesi Onaylandı")
+        notes.append(f"🔋 Sıkışma Onayı: Volatilite %{squeeze_pct} Daralmıştı -> Aşağı Patlama ({low_level:.4f})")
+        notes.append(f"⚡ Hacim Gücü: {rvol:.1f}x RVOL | Güçlü Ayı Kapanışı")
 
     if direction is None:
         return None
 
     # ------------------------------------------------------------------
-    # 🛡️ AKILLI RİSK FİLTRESİ (RISK FILTER RULES - ŞÜPHEDEYSEN REDDET)
+    # 🛡️ AKILLI RİSK FİLTRESİ
     # ------------------------------------------------------------------
 
-    # Kural 1: Ters Yöndeki Fitil Uzunsa (Rejection / Tepeden/Tabandan Ret Yemiş Mum) -> REDDET!
+    # Kural 1: Ters Yöndeki Ret Fitili Kontrolü (Max %25)
     if direction == "LONG":
         upper_wick = c.high - c.close
         if upper_wick > Config.MAX_REJECTION_WICK_RATIO * candle_range:
-            return None  # Tepeden güçlü ret fitili var, sahte kırılım, REDDET!
+            return None
     elif direction == "SHORT":
         lower_wick = c.close - c.low
         if lower_wick > Config.MAX_REJECTION_WICK_RATIO * candle_range:
-            return None  # Tabandan güçlü ret fitili var, sahte kırılım, REDDET!
+            return None
 
-    # Kural 2: Fiyat Kırılım Seviyesinden Zaten Çok Uzaklaşmışsa (Chase / Geç Kalınmış Sinyal) -> REDDET!
+    # Kural 2: Sıkışma Kutusundan Aşırı Uzaklaşma (Chase) Kontrolü (Max 0.95x ATR)
     dist_from_breakout = abs(c.close - breakout_level)
-    max_chase_dist = Config.MAX_CHASE_ATR_RATIO * atr
-    if dist_from_breakout > max_chase_dist:
-        return None  # Fiyat çoktan fırlamış, tepeden/dipten kovalamak (FOMO) yasak, REDDET!
+    if dist_from_breakout > Config.MAX_CHASE_ATR_RATIO * atr:
+        return None
 
-    # Kural 3: Canlı Mumda Sahte Kırılım veya Aşırı Uzaklaşma Kontrolü
+    # Kural 3: Canlı Mumda Sahte Kırılım veya Aşırı Fırlama Kontrolü
     if direction == "LONG":
         if live_c.close < breakout_level:
-            return None  # Sahte kırılım, canlı mum seviyenin altına çöktü!
+            return None
         if live_c.close > c.close + (0.50 * atr):
-            return None  # Canlı mumda fiyat daha da fırladı, geç kalındı!
+            return None
     elif direction == "SHORT":
         if live_c.close > breakout_level:
-            return None  # Sahte kırılım, canlı mum seviyenin üstüne çöktü!
+            return None
         if live_c.close < c.close - (0.50 * atr):
-            return None  # Canlı mumda fiyat daha da fırladı, geç kalındı!
+            return None
 
-    # Kural 4: 1 Saatlik Genel Trend Uyumu (48 Mum = 12 Saatlik EMA Trend Filtresi)
-    ema_trend = compute_ema(closed, 48)
-    if ema_trend > 0:
-        if direction == "LONG" and c.close < ema_trend:
-            return None  # 1 Saatlik genel düşüş trendinin tersine cılız kırılım, REDDET!
-        elif direction == "SHORT" and c.close > ema_trend:
-            return None  # 1 Saatlik genel yükseliş trendinin tersine cılız kırılım, REDDET!
+    # Kural 4: Çift EMA Trend Hizalaması (EMA20 & EMA50)
+    ema20 = compute_ema(closed, 20)
+    ema50 = compute_ema(closed, 50)
+    if ema20 <= 0 or ema50 <= 0:
+        return None
+    if direction == "LONG" and not (c.close > ema20 > ema50):
+        return None
+    if direction == "SHORT" and not (c.close < ema20 < ema50):
+        return None
+    notes.append("📈 Çift EMA Trend Onayı (EMA20 & EMA50 Hizalı)")
 
-    # Kural 5: Tükenme (Exhaustion / RSI Aşırı Şişme) Filtresi
+    # Kural 5: RSI Momentum Bandı (LONG: 50-75, SHORT: 25-50)
     rsi_14 = compute_rsi(closed, 14)
-    if direction == "LONG" and rsi_14 > 74.0:
-        return None  # Aşırı alım tükeniş bölgesi, REDDET!
-    elif direction == "SHORT" and rsi_14 < 26.0:
-        return None  # Aşırı satım tükeniş bölgesi, REDDET!
+    if direction == "LONG" and not (50.0 <= rsi_14 <= 75.0):
+        return None
+    if direction == "SHORT" and not (25.0 <= rsi_14 <= 50.0):
+        return None
 
     # Kural 6: BTC Piyasa Rejimi / Korelasyon Filtresi
     if btc_regime == "BTC_DUMP" and direction == "LONG":
-        return None  # BTC sert çakılırken altcoin LONG'u REDDET!
+        return None
     elif btc_regime == "BTC_PUMP" and direction == "SHORT":
-        return None  # BTC sert fırlarken altcoin SHORT'u REDDET!
+        return None
 
     # ------------------------------------------------------------------
-    # FİYAT HEDEFLERİ & KÂR/ZARAR PLANI
+    # FİYAT HEDEFLERİ & POZİTİF R:R PLANI (1:1.53 RRR)
     # ------------------------------------------------------------------
     entry_p = c.close
+    sl_dist = Config.SL_ATR_MULT * atr
     tp1_dist = max(Config.TP1_ATR_MULT * atr, entry_p * (Config.MIN_TP1_MOVE_PCT / 100.0))
-    tp2_dist = max(Config.TP2_ATR_MULT * atr, tp1_dist * 1.75)
+    tp2_dist = max(Config.TP2_ATR_MULT * atr, tp1_dist * 1.35)
 
-    # Stop-Loss: Kırılan yapının (destek/direnç) ve kırılım mumu fitilinin arkasında güvenli bölge
-    # Not: Stop'u entry'den değil, kırılan yapıdan geriye koyuyoruz ki doğal retest stop ettirmesin!
     if direction == "LONG":
+        sl_p = entry_p - sl_dist
         tp1_p = entry_p + tp1_dist
         tp2_p = entry_p + tp2_dist
-        struct_sl = breakout_level - (Config.SL_ATR_MULT * atr)
-        candle_sl = c.low - (0.20 * atr)
-        sl_p = min(struct_sl, candle_sl, entry_p - (0.80 * atr))
     else:
+        sl_p = entry_p + sl_dist
         tp1_p = entry_p - tp1_dist
         tp2_p = entry_p - tp2_dist
-        struct_sl = breakout_level + (Config.SL_ATR_MULT * atr)
-        candle_sl = c.high + (0.20 * atr)
-        sl_p = max(struct_sl, candle_sl, entry_p + (0.80 * atr))
 
     # Canlı mumda fiyat çoktan TP1'e ulaştıysa veya SL'yi vurduysa geç kalmış sinyali alma
     if direction == "LONG" and (live_c.high >= tp1_p or live_c.low <= sl_p):
@@ -264,11 +263,12 @@ def analyze_breakout(
     tp2_pct = abs(tp2_p - entry_p) / entry_p * 100.0
     sl_pct = abs(entry_p - sl_p) / entry_p * 100.0
 
-    if tp1_pct < Config.MIN_TP1_MOVE_PCT or sl_pct < 0.35:
+    # Gürültü stoplarını (%0.80 altı) ve aşırı komisyon maliyetini (%8 üstü) ele
+    if tp1_pct < Config.MIN_TP1_MOVE_PCT or sl_pct < Config.MIN_SL_PCT or sl_pct > 8.0:
         return None
 
-    rrr1 = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 1.50
-    rrr2 = round(tp2_pct / sl_pct, 2) if sl_pct > 0 else 2.60
+    rrr1 = round(tp1_pct / sl_pct, 2) if sl_pct > 0 else 1.53
+    rrr2 = round(tp2_pct / sl_pct, 2) if sl_pct > 0 else 2.10
 
     # Puanlama
     score = 75

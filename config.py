@@ -62,23 +62,25 @@ class Config:
     KLINE_LIMIT: int = 200  # Çekilecek mum sayısı
     SCAN_INTERVAL_SECONDS: int = int(os.getenv("SCAN_INTERVAL_SECONDS", "30"))  # Tarama döngü süresi (sn)
 
-    # --- Hacim Patlaması & Kırılım (Breakout Sniper) Parametreleri ---
-    BREAKOUT_LOOKBACK: int = int(os.getenv("BREAKOUT_LOOKBACK", "16"))  # Son 16 mumun (4 saat) tavanı / tabanı (Daha çevik tespit)
-    MIN_RVOL: float = float(os.getenv("MIN_RVOL", "1.80"))  # Kırılım mumu en az 1.8x ortalama hacimde olmalı
-    MIN_BODY_RATIO: float = float(os.getenv("MIN_BODY_RATIO", "0.45"))  # Kırılım mumunun gövdesi mum boyunun en az %45'i olmalı
-    MIN_TP1_MOVE_PCT: float = float(os.getenv("MIN_TP1_MOVE_PCT", "1.40"))  # Komisyonu ezen min %1.40 saf fiyat hareketi
-    TP1_ATR_MULT: float = float(os.getenv("TP1_ATR_MULT", "1.60"))  # TP1: 1.6x ATR
-    TP2_ATR_MULT: float = float(os.getenv("TP2_ATR_MULT", "2.80"))  # TP2: 2.8x ATR
-    SL_ATR_MULT: float = float(os.getenv("SL_ATR_MULT", "1.15"))   # SL: Kırılan seviyenin 1.15x ATR arkası (Dinamik piyasa koşullarına göre)
-    TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "1.00"))  # TP1'de pozisyonun %100'ünü kapatıp tam kârı al (Sniper Modu)!
+    # --- Sıkışma Patlaması (Volatility Squeeze Ignition) Parametreleri ---
+    BREAKOUT_LOOKBACK: int = int(os.getenv("BREAKOUT_LOOKBACK", "10"))  # Son 10 mumluk sıkışma kutusu (2.5 saat)
+    SQUEEZE_ATR_RATIO: float = float(os.getenv("SQUEEZE_ATR_RATIO", "0.92"))  # ATR_10 < 0.92 * ATR_50 (Sıkışma şartı - yorgun coinleri eler!)
+    MIN_RVOL: float = float(os.getenv("MIN_RVOL", "1.60"))  # Kırılım mumu en az 1.6x ortalama hacimde olmalı
+    MIN_BODY_RATIO: float = float(os.getenv("MIN_BODY_RATIO", "0.48"))  # Kırılım mumunun gövdesi mum boyunun en az %48'i olmalı
+    MIN_TP1_MOVE_PCT: float = float(os.getenv("MIN_TP1_MOVE_PCT", "1.30"))  # Komisyonu ezen min %1.30 saf fiyat hareketi
+    MIN_SL_PCT: float = float(os.getenv("MIN_SL_PCT", "0.80"))  # Gürültü stopunu önlemek için min %0.80 SL mesafesi
+    TP1_ATR_MULT: float = float(os.getenv("TP1_ATR_MULT", "2.60"))  # TP1: Girişten 2.60x ATR (1:1.53 Pozitif RRR)
+    TP2_ATR_MULT: float = float(os.getenv("TP2_ATR_MULT", "3.60"))  # TP2: Yedek referans hedefi
+    SL_ATR_MULT: float = float(os.getenv("SL_ATR_MULT", "1.70"))   # SL: Girişten 1.70x ATR (Gürültüye çarpmayan yapısal stop)
+    TP1_CLOSE_PCT: float = float(os.getenv("TP1_CLOSE_PCT", "1.00"))  # TP1'de pozisyonun %100'ünü kapatıp tam kârı al!
 
-    # --- Akıllı Risk Filtresi & Erken Çıkış Parametreleri ---
-    MAX_BREAKOUT_ATR_DIST: float = float(os.getenv("MAX_BREAKOUT_ATR_DIST", "0.65"))  # Kırılım seviyesinden max 0.65x ATR uzaklaşma (Tepeden alımı engeller, geç sinyalleri eler!)
-    MAX_CHASE_ATR_RATIO: float = float(os.getenv("MAX_CHASE_ATR_RATIO", "0.65"))  # Kırılım seviyesinden max 0.65x ATR kovalamaca sınırı
-    MAX_REJECTION_WICK_RATIO: float = float(os.getenv("MAX_REJECTION_WICK_RATIO", "0.32"))  # Kırılım mumunda ters yöndeki fitil max %32 (Tepeden ret yemiş fitilleri reddet)
+    # --- Akıllı Risk Filtresi & Başabaş Kalkanı ---
+    MAX_BREAKOUT_ATR_DIST: float = float(os.getenv("MAX_BREAKOUT_ATR_DIST", "0.95"))
+    MAX_CHASE_ATR_RATIO: float = float(os.getenv("MAX_CHASE_ATR_RATIO", "0.95"))  # Sıkışma kutusundan max 0.95x ATR uzaklaşma
+    MAX_REJECTION_WICK_RATIO: float = float(os.getenv("MAX_REJECTION_WICK_RATIO", "0.25"))  # Ters yöndeki ret fitili max %25
+    BREAKEVEN_TRIGGER_R: float = float(os.getenv("BREAKEVEN_TRIGGER_R", "0.85"))  # +0.85R kârda SL'yi komisyon korumalı başabaşa çek
     STAGNATION_MAX_CANDLES: int = int(os.getenv("STAGNATION_MAX_CANDLES", "10"))  # 10 mum (2.5 saat) boyunca girişte oyalanırsa başabaş kapat
     STAGNATION_THRESHOLD_PCT: float = float(os.getenv("STAGNATION_THRESHOLD_PCT", "0.40"))  # Girişin %0.4 civarındaysa oyalanma say
-    NEAR_TP_TRIGGER_PCT: float = float(os.getenv("NEAR_TP_TRIGGER_PCT", "0.85"))  # TP1'e %85 yaklaşınca dönüş fitilinde erken kâr kilidi
 
     # --- Kasa Yönetimi, Sabit Dolar Riski ve Pozisyon Büyüklüğü ---
     DEFAULT_BANKROLL_USD: float = float(os.getenv("DEFAULT_BANKROLL_USD", "100.0"))

@@ -460,13 +460,15 @@ class BybitDemoTrader:
         tp2_str = self.round_step(setup.tp2_price, spec["tickSize"], round_down=(direction == "SHORT"))
 
         self.cancel_all_symbol_orders(symbol)
+        is_single_tp = Config.TP1_CLOSE_PCT >= 0.99
+        order_tp_str = tp1_str if is_single_tp else tp2_str
         order_params = {
             "category": "linear",
             "symbol": symbol,
             "side": side,
             "orderType": "Market",
             "qty": qty_str,
-            "takeProfit": tp2_str,
+            "takeProfit": order_tp_str,
             "stopLoss": sl_str,
             "tpTriggerBy": "LastPrice",
             "slTriggerBy": "LastPrice",
@@ -475,13 +477,18 @@ class BybitDemoTrader:
         res = self._request("POST", "/v5/order/create", order_params, signed=True)
         if res.get("retCode") == 0:
             est_sl_usd = notional_usd * (setup.sl_pct / 100.0)
+            tp_line = (
+                f"  • <b>Otomatik TP Hedefi (%100 Kapanış):</b> <code>{tp1_str}</code> (+%{setup.tp1_pct:.2f})\n"
+                if is_single_tp
+                else f"  • <b>Kademeli Hedefler:</b> TP1 (%75): <code>{tp1_str}</code> (+%{setup.tp1_pct:.2f}) | TP2: <code>{tp2_str}</code> (+%{setup.tp2_pct:.2f})\n"
+            )
             return (
                 True,
                 f"🤖 <b>BYBIT DEMO OTOMATİK İŞLEM AÇILDI!</b>\n"
-                f"  • <b>Tür:</b> <code>Hacim Patlaması & Kırılım ({side})</code> | <b>Miktar:</b> <code>{qty_str}</code>\n"
-                f"  • <b>Kırılan Seviye:</b> <code>{setup.breakout_level}</code> | <b>Hacim:</b> <code>{setup.rvol:.1f}x RVOL</code>\n"
-                f"  • <b>Kademeli Hedefler:</b> TP1 (%75): <code>{tp1_str}</code> (+%{setup.tp1_pct:.2f}) | TP2: <code>{tp2_str}</code> (+%{setup.tp2_pct:.2f})\n"
-                f"  • <b>Otomatik Stop-Loss:</b> <code>{sl_str}</code> <i>(Maks. Risk: -{est_sl_usd:.2f}$)</i>\n"
+                f"  • <b>Tür:</b> <code>Sıkışma Patlaması ({side})</code> | <b>Miktar:</b> <code>{qty_str}</code>\n"
+                f"  • <b>Kırılan Kutu:</b> <code>{setup.breakout_level}</code> | <b>Hacim:</b> <code>{setup.rvol:.1f}x RVOL</code>\n"
+                + tp_line
+                + f"  • <b>Otomatik Stop-Loss:</b> <code>{sl_str}</code> <i>(Maks. Risk: -{est_sl_usd:.2f}$)</i>\n"
                 f"  • <b>Kullanılan Marjin:</b> <b><code>{margin_usd:.2f}$</code></b> (Kasanın %10'u ➡️ <b>{eff_lev}x Dinamik Kaldıraç</b> ➡️ <code>{notional_usd:.0f}$</code> Büyüklük)",
             )
         return False, f"⚠️ <b>Bybit Demo Giriş Hatası:</b> <code>{res.get('retMsg')}</code>"
@@ -582,6 +589,38 @@ class BybitDemoTrader:
 
         return ""
 
+    def move_sl_to_breakeven(
+        self, symbol: str, direction: str, entry_price: float
+    ) -> Tuple[bool, str]:
+        """+0.85R kâra ulaşıldığında Stop-Loss'u komisyonu da kurtaran başabaş seviyesine taşır."""
+        if not self.is_configured or not self.enabled or entry_price <= 0:
+            return False, ""
+
+        open_pos = self.get_open_positions(symbol=symbol)
+        if not open_pos:
+            return False, ""
+
+        spec = self.get_instrument_spec(symbol)
+        avg_entry = float(open_pos[0].get("avgPrice") or entry_price)
+        raw_be = avg_entry * 1.0015 if direction == "LONG" else avg_entry * 0.9985
+        be_str = self.round_step(raw_be, spec["tickSize"], round_down=(direction == "SHORT"))
+
+        res = self._request(
+            "POST",
+            "/v5/position/trading-stop",
+            {
+                "category": "linear",
+                "symbol": symbol,
+                "stopLoss": be_str,
+                "slTriggerBy": "LastPrice",
+                "positionIdx": 0,
+            },
+            signed=True,
+        )
+        if res.get("retCode") == 0:
+            return True, f"🛡 <b>Bybit Demo:</b> #{symbol} Stop-Loss komisyon korumalı başabaşa (<code>{be_str}</code>) çekildi!"
+        return False, ""
+
     def sync_and_protect_open_positions(self, tracked_trades: Dict[str, Dict]) -> None:
         """
         Bybit Demo hesabındaki açık pozisyonları kontrol eder ve eksik TP/SL varsa koruma ekler.
@@ -616,7 +655,10 @@ class BybitDemoTrader:
             tr = tracked_by_sym.get(sym)
 
             if tr is not None:
-                target_tp = float(tr.get("tp2_price") or tr.get("tp2") or tr.get("tp1_price") or 0.0)
+                if Config.TP1_CLOSE_PCT >= 0.99:
+                    target_tp = float(tr.get("tp1_price") or tr.get("tp1") or 0.0)
+                else:
+                    target_tp = float(tr.get("tp2_price") or tr.get("tp2") or tr.get("tp1_price") or 0.0)
                 target_sl = float(tr.get("current_sl") or tr.get("initial_sl") or 0.0)
             else:
                 sl_dist = avg_price * 0.012
@@ -624,10 +666,10 @@ class BybitDemoTrader:
                 tp2_dist = avg_price * 0.032
                 if direction == "LONG":
                     target_sl = avg_price - sl_dist
-                    tp1_v, target_tp = avg_price + tp1_dist, avg_price + tp2_dist
+                    tp1_v, target_tp = avg_price + tp1_dist, (avg_price + tp1_dist if Config.TP1_CLOSE_PCT >= 0.99 else avg_price + tp2_dist)
                 else:
                     target_sl = avg_price + sl_dist
-                    tp1_v, target_tp = avg_price - tp1_dist, avg_price - tp2_dist
+                    tp1_v, target_tp = avg_price - tp1_dist, (avg_price - tp1_dist if Config.TP1_CLOSE_PCT >= 0.99 else avg_price - tp2_dist)
 
                 tid = f"{sym}_{direction}_SYNCED"
                 tracked_trades[tid] = {

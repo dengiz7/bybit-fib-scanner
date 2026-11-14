@@ -52,6 +52,7 @@ class ScannerEngine:
         self.active_setups: Dict[str, BreakoutSetup] = {}
 
         self.state: Dict = self._load_state()
+        self._deduplicate_daily_events()
         self.notifier._last_update_id = int(self.state.get("last_update_id", 0))
 
     def _load_state(self) -> Dict:
@@ -92,6 +93,42 @@ class ScannerEngine:
         except Exception as exc:
             print(f"[UYARI] State kaydedilemedi: {exc}")
 
+    def _deduplicate_daily_events(self) -> None:
+        """state['daily_events'] içindeki mükerrer işlem kayıtlarını temizler."""
+        events: List[Dict] = self.state.get("daily_events", [])
+        if not events:
+            return
+
+        seen_ids = set()
+        seen_signatures = set()
+        deduped: List[Dict] = []
+        for ev in events:
+            ev_oid = str(ev.get("bybit_order_id") or "").strip()
+            setup_id = str(ev.get("setup_id") or "").strip()
+            ev_type = str(ev.get("event_type") or "")
+            sig = (
+                ev.get("symbol", ""),
+                ev.get("direction", ""),
+                ev.get("time_str", ""),
+                round(float(ev.get("pnl_usd", 0.0)), 2),
+                ev_type,
+            )
+            if ev_oid and (ev_oid, ev_type) in seen_ids:
+                continue
+            if setup_id and (setup_id, ev_type) in seen_ids:
+                continue
+            if sig in seen_signatures:
+                continue
+
+            if ev_oid:
+                seen_ids.add((ev_oid, ev_type))
+            if setup_id:
+                seen_ids.add((setup_id, ev_type))
+            seen_signatures.add(sig)
+            deduped.append(ev)
+
+        self.state["daily_events"] = deduped
+
     def sync_real_bybit_balance_and_pnl(self) -> None:
         """Bybit Demo hesabındaki gerçek cüzdan bakiyesini ve gerçekleşen PnL kayıtlarını senkronize eder."""
         if not self.demo_trader.is_configured:
@@ -104,21 +141,28 @@ class ScannerEngine:
             self.state["unrealised_pnl"] = acc_summary["unrealised_pnl"]
             self.state["current_bankroll"] = acc_summary["total_equity"]
 
+        self._deduplicate_daily_events()
+
         now_tr = datetime.now(TR_TZ)
         today_key = now_tr.strftime("%Y-%m-%d")
         daily_events: List[Dict] = self.state.setdefault("daily_events", [])
-        synced_ids = set(self.state.setdefault("synced_bybit_order_ids", []))
+        synced_list: List[str] = [str(x) for x in self.state.get("synced_bybit_order_ids", []) if x]
+        synced_ids = set(synced_list)
+        for ev in daily_events:
+            if ev.get("bybit_order_id"):
+                synced_ids.add(str(ev["bybit_order_id"]))
+            if ev.get("bybit_synced") and ev.get("setup_id"):
+                synced_ids.add(str(ev["setup_id"]))
 
         closed_pnl_records = self.demo_trader.get_closed_pnl_records(limit=30)
         for rec in closed_pnl_records:
-            oid = str(rec.get("orderId") or rec.get("execId") or "")
-            if not oid or oid in synced_ids:
-                continue
-            synced_ids.add(oid)
-
             sym = rec.get("symbol", "")
             side = rec.get("side", "")
             direction = "LONG" if side == "Buy" else "SHORT"
+            oid = str(rec.get("orderId") or rec.get("execId") or f"{sym}_{rec.get('updatedTime', '')}")
+            if not oid or oid in synced_ids:
+                continue
+
             try:
                 real_pnl = round(float(rec.get("closedPnl") or 0.0), 2)
                 upd_ms = int(rec.get("updatedTime") or time.time() * 1000)
@@ -129,23 +173,50 @@ class ScannerEngine:
             if ev_dt.strftime("%Y-%m-%d") != today_key:
                 continue
 
+            fallback_sid = f"{sym}_{direction}_{oid[:8]}"
+            already_present = any(
+                str(ev.get("bybit_order_id") or "") == oid
+                or str(ev.get("setup_id") or "") == fallback_sid
+                or (
+                    ev.get("symbol") == sym
+                    and ev.get("bybit_synced")
+                    and abs(int(ev.get("ts", 0)) - upd_ms) < 120_000
+                    and abs(float(ev.get("pnl_usd", 0.0)) - real_pnl) < 0.05
+                )
+                for ev in daily_events
+            )
+            if already_present:
+                synced_ids.add(oid)
+                synced_list.append(oid)
+                continue
+
+            synced_ids.add(oid)
+            synced_list.append(oid)
+
             matched = False
             for ev in reversed(daily_events):
                 if ev.get("symbol") == sym and abs(int(ev.get("ts", 0)) - upd_ms) < 300_000 and not ev.get("bybit_synced"):
                     ev["pnl_usd"] = real_pnl
                     ev["bybit_synced"] = True
+                    ev["bybit_order_id"] = oid
                     matched = True
                     break
 
             if not matched:
-                etype = "TP1" if real_pnl >= 0 else "STOP_LOSS"
+                if abs(real_pnl) <= 0.35:
+                    etype = "BREAKEVEN_STOP"
+                elif real_pnl > 0.35:
+                    etype = "TP1"
+                else:
+                    etype = "STOP_LOSS"
                 daily_events.append(
                     {
-                        "setup_id": f"{sym}_{direction}_{oid[:8]}",
+                        "setup_id": fallback_sid,
+                        "bybit_order_id": oid,
                         "symbol": sym,
                         "direction": direction,
                         "grade": "A+",
-                        "margin_usd": 20.0,
+                        "margin_usd": 10.0,
                         "event_type": etype,
                         "pnl_usd": real_pnl,
                         "trade_total_usd": real_pnl,
@@ -157,8 +228,7 @@ class ScannerEngine:
                     }
                 )
 
-        if len(synced_ids) > 300:
-            self.state["synced_bybit_order_ids"] = list(synced_ids)[-200:]
+        self.state["synced_bybit_order_ids"] = synced_list[-300:]
 
     def _record_trade_event(
         self,
@@ -348,7 +418,7 @@ class ScannerEngine:
                 )
 
                 if hit_sl:
-                    if "TP1" in hits:
+                    if "TP1" in hits or tr.get("be_locked"):
                         # Başabaş Stop (+0 zarar)
                         tot_usd = self._record_trade_event(tid, tr, "BREAKEVEN_STOP", 0.0)
                         demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "BREAKEVEN_STOP") if not self.dry_run else ""
@@ -463,37 +533,28 @@ class ScannerEngine:
                         del tracked_trades[tid]
                         continue
 
-                # --- DİNAMİK KÂR KİLİDİ (TP1'e %85 yaklaşıp dönüş fitili verirse erkenden kapat) ---
-                tp1_dist = abs(tp1_p - entry_p)
-                if direction == "LONG":
-                    progress = (bar_high - entry_p) / tp1_dist if tp1_dist > 0 else 0.0
-                    is_pulling_back = live_c.close < bar_high - (0.35 * (bar_high - entry_p))
-                else:
-                    progress = (entry_p - bar_low) / tp1_dist if tp1_dist > 0 else 0.0
-                    is_pulling_back = live_c.close > bar_low + (0.35 * (entry_p - bar_low))
-
-                if "TP1" not in hits and progress >= Config.NEAR_TP_TRIGGER_PCT and is_pulling_back:
-                    hits.append("TP1")
-                    tr["current_sl"] = entry_p
-                    gain_tp1_usd = Config.TP1_CLOSE_PCT * pos_usd * (abs(live_c.close - entry_p) / entry_p)
-                    tot_usd = self._record_trade_event(tid, tr, "TP1", gain_tp1_usd)
-                    demo_note = self.demo_trader.handle_trade_lifecycle_event(tr, "TP1") if not self.dry_run else ""
-                    if not self.dry_run and self.notifier.is_configured:
-                        m_txt = (
-                            f"⚡ <b>DİNAMİK KÂR KİLİDİ (TP1'DEN DÖNÜŞ) — #{sym}</b>\n"
-                            f"━━━━━━━━━━━━━━━━━━━━━━\n"
-                            f"🎯 Fiyat TP1 hedefine <b>%{progress*100:.0f}</b> oranında ulaştı ve dönüş fitili verdi!\n"
-                            f"💵 Kârı kaçırmamak için <b>pozisyonun %75'i erkenden kapatıldı (+{gain_tp1_usd:.2f}$)</b>.\n"
-                            f"🛡 Kalan %25 için Stop-Loss <b>Giriş Fiyatına (Başabaş)</b> çekildi!"
-                        )
-                        if demo_note:
-                            m_txt += f"\n\n{demo_note}"
-                        self.notifier.send_message(m_txt)
-                        print(f"[TELEGRAM GÖNDERİLDİ] Dinamik TP1 Kâr Kilidi -> {sym}")
-
-                    if Config.TP1_CLOSE_PCT >= 0.99:
-                        del tracked_trades[tid]
-                        continue
+                # --- +0.85R KOMİSYON KORUMALI BAŞABAŞ KALKANI (BREAKEVEN LOCK) ---
+                init_sl = float(tr.get("initial_sl") or active_sl)
+                sl_dist = abs(entry_p - init_sl)
+                if not tr.get("be_locked") and "TP1" not in hits and sl_dist > 0:
+                    favorable_move = (bar_high - entry_p) if direction == "LONG" else (entry_p - bar_low)
+                    if favorable_move >= Config.BREAKEVEN_TRIGGER_R * sl_dist:
+                        be_price = entry_p * 1.0015 if direction == "LONG" else entry_p * 0.9985
+                        tr["current_sl"] = be_price
+                        tr["be_locked"] = True
+                        demo_note = self.demo_trader.move_sl_to_breakeven(sym, direction, entry_p)[1] if not self.dry_run else ""
+                        if not self.dry_run and self.notifier.is_configured:
+                            m_txt = (
+                                f"🛡 <b>BAŞABAŞ KALKANI DEVREDE (+{Config.BREAKEVEN_TRIGGER_R}R) — #{sym}</b>\n"
+                                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                                f"🎯 İşlem stop mesafesinin <b>+{Config.BREAKEVEN_TRIGGER_R:.2f}R</b> katı kâra ulaştı!\n"
+                                f"🔒 Kârı erken kırpmadan hedefe yürümek için Stop-Loss <b>komisyon korumalı başabaş</b> seviyesine çekildi.\n"
+                                f"🚀 Artık bu işlemde zarar riski <b>0.00$</b>! Hedef: <code>{fmt_price(tp1_p)}</code>"
+                            )
+                            if demo_note:
+                                m_txt += f"\n\n{demo_note}"
+                            self.notifier.send_message(m_txt)
+                            print(f"[TELEGRAM GÖNDERİLDİ] +0.85R Başabaş Kalkanı -> {sym}")
 
             # 2) Yeni Hacimli Kırılımları Tara
             cur_bank = float(self.state.get("current_bankroll", Config.DEFAULT_BANKROLL_USD))
@@ -608,7 +669,7 @@ class ScannerEngine:
         return (
             f"📊 <b>TARAYICI VE GERÇEK KASA DURUM RAPORU</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🚀 <b>Strateji:</b> Hacim Patlaması & Kırılım (Breakout Sniper | 15dk)\n"
+            f"🚀 <b>Strateji:</b> Volatilite Sıkışması & Kırılım (Squeeze Ignition | 15dk)\n"
             f"🏦 <b>Borsa:</b> Bybit USDT Vadeli (Demo Canlı Senkronize)\n"
             f"🔢 <b>Taranan Parite:</b> {self.last_scanned_symbols_count} yüksek hacimli coin\n"
             f"🔄 <b>Toplam Tarama:</b> {self.scan_count}\n"

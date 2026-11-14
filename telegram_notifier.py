@@ -47,8 +47,8 @@ def format_setup_message(
 ) -> str:
     is_long = setup.direction == "LONG"
     dir_emoji = "🟢" if is_long else "🔴"
-    dir_text = "LONG (Yukarı Hacimli Kırılım)" if is_long else "SHORT (Aşağı Hacimli Kırılım)"
-    level_label = "🔺 20-Mum Zirvesi" if is_long else "🔻 20-Mum Tabanı"
+    dir_text = "LONG (Sıkışma Yukarı Kırılım)" if is_long else "SHORT (Sıkışma Aşağı Kırılım)"
+    level_label = "🔺 10-Mum Sıkışma Tavanı" if is_long else "🔻 10-Mum Sıkışma Tabanı"
 
     bankroll = max(10.0, current_bankroll)
     margin_usd = max(2.50, round(bankroll * (Config.MARGIN_PER_TRADE_PCT / 100.0), 2))
@@ -161,6 +161,14 @@ def format_tp_hit_message(
             f"🎉 <b>Tebrikler!</b> Kırılım dalgası hedefine ulaştı ve işlem tamamlandı."
         )
     elif event_type == "BREAKEVEN_STOP":
+        if Config.TP1_CLOSE_PCT >= 0.99 or trade.get("be_locked"):
+            return (
+                f"🛡 <b>BAŞABAŞ KALKANI (+{Config.BREAKEVEN_TRIGGER_R:.2f}R) STOP — #{symbol}</b> ({dir_emoji} {direction})\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📌 İşlem kâra geçtikten sonra çekilen komisyon korumalı başabaş seviyesinde kapandı.\n"
+                f"💵 <b>İşlemden Net Sonuç:</b> <b><code>{fmt_usd_signed(total_trade_pnl_usd)}</code></b> | "
+                f"<b>Güncel Kasa:</b> <code>{current_bankroll:.2f}$</code>"
+            )
         return (
             f"🛡 <b>BAŞABAŞ (GİRİŞ SEVİYESİ) STOP — #{symbol}</b> ({dir_emoji} {direction})\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -344,9 +352,10 @@ class TelegramNotifier:
 
             if cmd in ("/start", "/yardim", "/help"):
                 welcome = (
-                    "👋 <b>Hacim Patlaması & Zirve Kırılımı (Breakout Sniper) Botuna Hoş Geldin!</b>\n\n"
-                    "🚀 <b>Strateji Mantığı:</b> 15 dakikalık mumlarda 20-mum zirvesini/tabanını <b>en az 1.8x - 2.5x hacim patlamasıyla</b> "
-                    "kıran pariteleri yakalar; sahte kırılımları eler ve Bybit Demo hesabında otomatik emir açar.\n\n"
+                    "👋 <b>Volatility Squeeze Ignition (Sıkışma &amp; Kırılım) Botuna Hoş Geldin!</b>\n\n"
+                    "🚀 <b>Strateji Mantığı:</b> 15 dakikalık mumlarda volatilite sıkışmasını (ATR10 &lt; 0.92×ATR50) ve "
+                    "10-mum kutu kırılımını hacim patlamasıyla yakalar; sahte kırılımları eler, +0.85R'da stopu komisyon korumalı başabaşa çeker "
+                    "ve Bybit Demo hesabında otomatik emir açar.\n\n"
                     "📌 <b>Kullanabileceğin Komutlar:</b>\n"
                     "  • /rapor — Saatlik ve günlük TP/SL kâr-zarar bilançosu\n"
                     "  • /demo — Bybit Demo açık pozisyonlar ve bakiye\n"
